@@ -1,0 +1,13 @@
+{
+  "_comment": "Stil kütüphanesi (Faz 2). Çip tıklanınca 'hint' metni kullanıcı mesajına eklenir; LLM bunu seçili model ailesinin stiline çevirir (etiket vs. doğal dil). Yeni stil eklemek için listeye obje ekleyin.",
+  "styles": [
+    { "id": "cinematic", "name": "Sinematik", "hint": "sinematik film karesi, dramatik ışıklandırma, film grain, anamorfik görünüm" },
+    { "id": "photoreal", "name": "Fotogerçekçi", "hint": "fotogerçekçi, DSLR fotoğraf görünümü, doğal ışık, keskin detay" },
+    { "id": "anime", "name": "Anime", "hint": "anime / cel-shaded illüstrasyon stili, temiz çizgiler, canlı renkler" },
+    { "id": "digital_art", "name": "Dijital illüstrasyon", "hint": "dijital illüstrasyon, konsept sanatı, boyamsı fırça dokusu" },
+    { "id": "watercolor", "name": "Suluboya", "hint": "suluboya / pastel el çizimi dokusu, yumuşak geçişler" },
+    { "id": "cyberpunk", "name": "Cyberpunk", "hint": "neon cyberpunk atmosferi, yağmurlu gece, hologramlar" },
+    { "id": "dark_fantasy", "name": "Karanlık fantezi", "hint": "karanlık fantezi, gotik atmosfer, sisli ve gizemli" },
+    { "id": "minimal", "name": "Minimalist", "hint": "minimalist kompozisyon, geniş negatif alan, sade renk paleti" }
+  ]
+}

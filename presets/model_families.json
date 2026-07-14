@@ -1,0 +1,75 @@
+{
+  "_comment": "Model aileleri. 'llm_guidance' sistem promptuna enjekte edilir ve prompt STİLİNİ belirler. 'supports_negative:false' olan ailelerde backend negative prompt'u her koşulda siler (LLM üretse bile). 'resolution_key' formats.json içindeki hangi çözünürlük alanının kullanılacağını söyler. 'character_mode': booru = karakter adı doğrudan etiket olarak çalışır, describe = isim tanıma güvenilmez, görsel tarif gerekir.",
+  "default": "sdxl",
+  "families": [
+    {
+      "id": "sd15",
+      "name": "SD 1.5",
+      "label": "SD1.5",
+      "desc": "Hafif ve hızlı; 512-768px taban, klasik etiket stili",
+      "supports_negative": true,
+      "character_mode": "describe",
+      "resolution_key": "gen_sd15",
+      "settings": {
+        "sampler": "dpmpp_2m",
+        "scheduler": "karras",
+        "steps": [25, 30],
+        "cfg": [6, 8],
+        "cfg_note": null
+      },
+      "llm_guidance": "Virgülle ayrılmış YOĞUN ETİKET listesi yaz; önemli ögelere (etiket:1.3) ağırlık verilebilir. Kalite etiketleri ekle: masterpiece, best quality, highly detailed. Negative prompt için klasik kalabalık listeyi kullan ve sahneye özgü negatifler ekle: worst quality, low quality, lowres, bad anatomy, bad hands, extra fingers, missing fingers, cropped, jpeg artifacts, signature, watermark, username, text, blurry. Karakter isteklerinde isim tanıma ZAYIFTIR: LoRA yoksa karakterin görsel özelliklerini etiketlerle tarif et."
+    },
+    {
+      "id": "sdxl",
+      "name": "SDXL",
+      "label": "SDXL",
+      "desc": "Genel amaçlı, dengeli kalite; ~1024px taban (varsayılan)",
+      "supports_negative": true,
+      "character_mode": "describe",
+      "resolution_key": "gen",
+      "settings": {
+        "sampler": "dpmpp_2m",
+        "scheduler": "karras",
+        "steps": [25, 30],
+        "cfg": [5, 7],
+        "cfg_note": null
+      },
+      "llm_guidance": "ETİKET + KISA CÜMLE karışımı yaz: ana özneyi 1-2 kısa betimleyici cümleyle kur, ardından stil/ışık/detay etiketleri ekle; gerekirse (öge:1.2) ağırlıklandırma kullan. Aşırı uzun etiket yığınından kaçın. Negative prompt KISA ve hedefli olsun (ör: blurry, lowres, bad anatomy, bad hands, deformed, watermark, text, oversaturated). Karakter isteklerinde isim tanıma güvenilmez: LoRA yoksa karakterin saç/göz/kıyafet/aksesuar/duruş özelliklerini ayrıntılı tarif et, ismi tek başına kullanma."
+    },
+    {
+      "id": "pony",
+      "name": "Pony / Illustrious (anime)",
+      "label": "Pony/Illustrious",
+      "desc": "Anime/illüstrasyon; Danbooru etiketleri ve karakter adlarını tanır",
+      "supports_negative": true,
+      "character_mode": "booru",
+      "resolution_key": "gen",
+      "settings": {
+        "sampler": "euler_ancestral",
+        "scheduler": "normal",
+        "steps": [25, 30],
+        "cfg": [5, 7],
+        "cfg_note": null
+      },
+      "llm_guidance": "BOORU/DANBOORU etiket stili kullan: alt çizgili, virgülle ayrılmış etiketler. Positive prompt'un BAŞINA kalite etiketlerini koy: score_9, score_8_up, score_7_up (Pony için) veya masterpiece, best quality, very aesthetic (Illustrious için) — ikisini de eklemek güvenlidir. 1girl/1boy/no humans, bakış, poz, kompozisyon (from above, close-up vb.) gibi standart booru etiketlerini kullan. Negative prompt: score_6, score_5, score_4, worst quality, low quality, bad anatomy, bad hands, extra digits, watermark, signature, jpeg artifacts. Karakter isteklerinde popüler anime/manga karakterlerinin adını ve seri adını DOĞRUDAN etiket olarak yaz (ör: karakter_adi \\(seri_adi\\) veya karakter_adi, seri_adi) — bu ailede isim tanıma çalışır; yine de az bilinen/yeni karakterlerde güvenilirlik düşer, emin değilsen söyle."
+    },
+    {
+      "id": "flux",
+      "name": "Flux (dev/schnell)",
+      "label": "Flux",
+      "desc": "En güncel; doğal dil ister, negative prompt kullanmaz",
+      "supports_negative": false,
+      "character_mode": "describe",
+      "resolution_key": "gen",
+      "settings": {
+        "sampler": "euler",
+        "scheduler": "simple",
+        "steps": [20, 28],
+        "cfg": [1, 1],
+        "cfg_display": "1.0 (FluxGuidance ≈ 3.5)",
+        "cfg_note": "Flux'ta klasik CFG kullanılmaz (1.0 bırakın); yönlendirme FluxGuidance ≈ 3.5 ile yapılır. Schnell varyantında 4 step yeterlidir."
+      },
+      "llm_guidance": "AKICI, BETİMLEYİCİ DOĞAL DİL yaz: 2-5 tam cümlelik tek paragraf. Sahneyi bir fotoğraf yönetmeni gibi anlat: özne, ortam, ışık, kompozisyon, renk paleti, doku ve atmosfer cümle içinde aksın. ASLA virgülle ayrılmış etiket yığını, score_ etiketi, masterpiece/best quality kalıbı veya (kelime:1.2) ağırlık sözdizimi KULLANMA. NEGATIVE PROMPT ÜRETME (null döndür) — Flux negatif prompt kullanmaz. Karakter isteklerinde isim tanıma güvenilmez: LoRA yoksa karakterin görünümünü cümle içinde ayrıntılı tarif et."
+    }
+  ]
+}

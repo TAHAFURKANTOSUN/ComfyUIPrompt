@@ -1,0 +1,95 @@
+{
+  "_comment": "Format preset'leri. Yeni preset eklemek için bu listeye yeni bir obje ekleyin — kod değişikliği gerekmez. 'gen' = SDXL/Flux üretim (taban) çözünürlüğü, 'gen_sd15' = SD 1.5 için güvenli taban (SD1.5 yüksek çözünürlükte özne kopyalar), 'target' = nihai hedef (upscale sonrası). 'icon' frontend'deki ikon adıdır (bkz. frontend/src/icons.jsx).",
+  "formats": [
+    {
+      "id": "desktop_fhd",
+      "name": "Masaüstü duvar kağıdı (Full HD)",
+      "ratio": "16:9",
+      "target": [1920, 1080],
+      "gen": [1344, 768],
+      "gen_sd15": [768, 432],
+      "note": null,
+      "icon": "monitor"
+    },
+    {
+      "id": "desktop_4k",
+      "name": "Masaüstü duvar kağıdı (4K)",
+      "ratio": "16:9",
+      "target": [3840, 2160],
+      "gen": [1344, 768],
+      "gen_sd15": [768, 432],
+      "note": "Tabanda üretip ComfyUI'de upscale node'u ile büyütün (ör. 2 aşamalı upscale).",
+      "icon": "monitor-up"
+    },
+    {
+      "id": "ultrawide",
+      "name": "Ultra geniş monitör",
+      "ratio": "21:9",
+      "target": [3440, 1440],
+      "gen": [1536, 640],
+      "gen_sd15": [768, 320],
+      "note": null,
+      "icon": "rectangle-horizontal"
+    },
+    {
+      "id": "phone",
+      "name": "Telefon duvar kağıdı",
+      "ratio": "9:16",
+      "target": [1080, 1920],
+      "gen": [768, 1344],
+      "gen_sd15": [432, 768],
+      "note": null,
+      "icon": "smartphone"
+    },
+    {
+      "id": "phone_hd",
+      "name": "Telefon duvar kağıdı (yüksek çözünürlük)",
+      "ratio": "9:16",
+      "target": [1440, 3120],
+      "gen": [768, 1344],
+      "gen_sd15": [432, 768],
+      "note": "Tabanda üretip 2x upscale uygulayın.",
+      "icon": "smartphone-charging"
+    },
+    {
+      "id": "tablet",
+      "name": "Tablet",
+      "ratio": "3:4",
+      "target": [1620, 2160],
+      "gen": [896, 1152],
+      "gen_sd15": [576, 768],
+      "note": null,
+      "icon": "tablet"
+    },
+    {
+      "id": "ig_post",
+      "name": "Instagram gönderisi",
+      "ratio": "1:1",
+      "target": [1080, 1080],
+      "gen": [1024, 1024],
+      "gen_sd15": [512, 512],
+      "note": null,
+      "icon": "instagram"
+    },
+    {
+      "id": "story",
+      "name": "Instagram/TikTok story",
+      "ratio": "9:16",
+      "target": [1080, 1920],
+      "gen": [768, 1344],
+      "gen_sd15": [432, 768],
+      "note": null,
+      "icon": "gallery-vertical-end"
+    },
+    {
+      "id": "avatar",
+      "name": "Kare profil/avatar",
+      "ratio": "1:1",
+      "target": [512, 512],
+      "gen": [1024, 1024],
+      "gen_sd15": [512, 512],
+      "note": "Yüksek tabanda üretip hedefe küçültün (downscale) — detay kalitesi artar.",
+      "icon": "circle-user-round"
+    }
+  ]
+}

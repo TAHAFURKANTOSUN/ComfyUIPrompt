@@ -1,0 +1,48 @@
+# Geliştirme Notları (karar günlüğü)
+
+Bu dosya, projeyi devralan birinin (veya bir sonraki oturumun) kararların *nedenini* hızlıca anlaması içindir.
+
+## Mimari kararlar
+
+1. **Backend: FastAPI (Python), Express değil.** Hedef kullanıcı ComfyUI kullanıyor → makinesinde Python zaten var. Node.js bağımlılığını tamamen kaldırmak için frontend önceden derlendi ve `frontend/dist` olarak teslim edildi; FastAPI bunu statik sunar. Kullanıcı için tek gereksinim: Python + Ollama.
+
+2. **"Deterministik çekirdek + LLM protokolü" tasarımı (en kritik karar).** Yerel küçük modeller katı format kurallarına güvenilir uymaz. Bu yüzden LLM'den Bölüm 6 şablonunu yazması İSTENMEZ; yalnızca iki tip JSON döndürür: `{"action":"chat","message":…}` veya `{"action":"generate","positive_prompt":…,"negative_prompt":…,"lora":…,"note":…}`. Şablonu, çözünürlüğü, sampler/steps/CFG'yi backend `presets/*.json`'dan doldurur (`backend/prompting.py: build_package + render_template`). Sonuç: kabul kriterleri 2 (preset→çözünürlük), 3 (Flux'ta negative yasağı) ve 4 (şablona birebir uyum) **kod garantisi** altındadır; model kalitesinden bağımsızdır. Bölüm 5'teki sistem promptu metni birebir gömülü, yalnızca çıktı kanalı bu protokole bağlandı (6. kuralın şablonunu uygulama üretiyor — niyet korunuyor).
+
+3. **Ollama entegrasyonu:** native `/api/chat` + structured outputs (JSON şeması ile `format`). Eski Ollama sürümü şemayı reddederse otomatik `format:"json"` → serbest metin kademeli düşüşü var; ayrıştırıcı (`parse_llm_output`) `<think>` blokları, ```json çitleri ve JSON etrafındaki lafları tolere eder, hiç JSON yoksa sohbet mesajına düşer (uygulama asla çökmez). `llm.mode:"openai"` ile LM Studio/llama.cpp de destekleniyor.
+
+4. **SD 1.5 için ayrı taban çözünürlük (`gen_sd15`).** Görevdeki tablo yalnızca SDXL/Flux tabanı veriyor; SD 1.5'e 1344x768 vermek özne kopyalamasına yol açar. Her preset'e orana sadık, 8'in katı SD1.5 tabanı eklendi (ör. telefon 432x768). Aile hangi alanı kullanacağını `model_families.json → resolution_key` ile seçer.
+
+5. **`trust_env=False` tüm yerel HTTP çağrılarında.** Sistem proxy'si tanımlı ortamlarda (kurumsal makineler dahil) httpx, localhost'a giden Ollama/ComfyUI isteklerini proxy'ye yönlendirip kırabiliyor — geliştirme sandbox'ında bizzat yaşandı. Yerel servislere proxy uygulanmaması doğru davranış.
+
+6. **Avatar preset'i istisnası:** hedef (512) üretimden (1024) küçük olduğundan şablondaki etiket "Nihai hedef (downscale sonrası)" olarak uyarlanır; diğer tüm preset'lerde "upscale sonrası" yazar.
+
+7. **ComfyUI gönderimi backend proxy'siyle** yapılır (tarayıcı→8188 CORS sorunu yok). Şablon: CheckpointLoaderSimple → CLIPTextEncode ×2 → KSampler → VAEDecode → SaveImage (`backend/workflows/`). Steps/CFG aralığın orta değeri, seed rastgele. LoRA node'u bilinçli olarak yok (dosya adı sunucu tarafında bilinemez) — kullanıcıya kopyala-yapıştır öneriliyor.
+
+8. **Oturumlar in-memory** (görev tanımı yeterli dedi): son 24 mesaj sistemle gönderilir, 200 oturumda LRU budama. Kalıcılık istenirse SQLite eklenebilir (SESSIONS sözlüğünü saran küçük bir katman yeter).
+
+9. **Faz 2 özellikleri dahil edildi** (mimari zaten hazırdı, maliyeti düşüktü): ComfyUI'ye gönderme, favoriler (tarayıcı localStorage), stil kütüphanesi (`presets/styles.json`). Frontend'de `llm_guidance` istemciye sızdırılmaz.
+
+10. **Görselden prompt tahmini: iki aşamalı vision akışı (v1.1).** Görsel, ayrı bir çok-modlu modelle (`llm.vision_model`, varsayılan qwen2.5vl:7b) tek paragraflık İngilizce tarife çevrilir; tarif "[Eklenen görselin otomatik analizi]: …" bloğu olarak kullanıcı mesajına gömülür ve NORMAL metin boru hattından geçer. Tek modelli (vision modeliyle sohbet) alternatife tercih edilme nedenleri: (a) sohbet geçmişi salt metin kalır — takip mesajları ("aynısı ama gece") görsel olmadan çalışır, model yönlendirme karmaşası yok; (b) kullanıcı sohbet modelini serbestçe seçebilir, görsel desteklemeyen modellerle çakışma olmaz; (c) iki model VRAM'de aynı anda durmak zorunda değil (keep_alive sırayla boşaltır; "Belleği boşalt" artık ikisini de kaldırır). Görsel tarayıcıda ~1024px JPEG'e küçültülür (canvas), backend data-URL önekini ayıklar. Vision modeli yüklü değilse Türkçe hata + `ollama pull` ipucu döner.
+
+## Doğrulama (Bölüm 10 — 2026-07-02, v1.1 vision güncellemesiyle yeniden koşuldu)
+
+`tests/test_acceptance.py`: sahte Ollama (`tests/mock_ollama.py`) 11434'te gerçek HTTP sunucusu olarak koşturuldu; backend gerçek istek döngüsünden geçirildi. **52/52 kontrol geçti:**
+
+- Kriter 1 (stil ayrımı): aynı "sisli orman" isteği 4 ailede farklı üretildi; pony `score_9…` ile, sd15 `masterpiece…` ile başlıyor, flux çok cümleli doğal dil; ailelere özel rehberin sistem promptuna enjekte edildiği ayrıca doğrulandı.
+- Kriter 2 (çözünürlük): masaüstü 1344x768 ↔ telefon 768x1344; SD1.5 telefonda 432x768; avatar 1024→512 downscale etiketi.
+- Kriter 3 (Flux): sahte model kasıtlı negative gönderdi → guard sildi, şablonda NEGATIVE bölümü yok, CFG "1.0 (FluxGuidance ≈ 3.5)".
+- Kriter 4 (şablon): telefon+SDXL+LoRA paketi beklenen şablonla **karakter karaktere** eşleşti.
+- Kriter 5 (karakter): "Hatsune Miku telefon duvar kağıdı" → önce LoRA sorusu; "yok"+Pony → `hatsune_miku, vocaloid` etiketi; "yok"+SDXL → isimsiz tarif + LoRA önerisi notu; trigger verilince → trigger başta + LoRA satırı şablonda.
+- Görselden prompt [6]: boş metin + görsel → paket; sahte vision tarifi ikinci aşamada aile stiline çevrildi (flux doğal dil / pony score_9 booru); görsel akışında da Flux negative guard'ı ve preset çözünürlüğü doğrulandı; data-URL öneki ayıklanıyor; vision modeli yoksa 502 + `ollama pull` ipucu; status ucu vision bilgisi raporluyor.
+- Ek: bozuk model çıktısı sohbete düşer, Ollama kapalıyken 502+Türkçe ipucu, geçersiz preset 400, çözünürlükler 8'in katı, aile seçilmezse varsayılan SDXL.
+
+Ayrıca gerçek süreçle (`python -m backend.main`) frontend'in sunulduğu ve story+flux isteğinin doğru paket ürettiği doğrulandı.
+
+**Sınır:** Geliştirme ortamının ağ kısıtları nedeniyle gerçek bir LLM indirilemedi; kabul kriterlerinin LLM'den bağımsız olanları kod garantisiyle, LLM'e bakan uçlar sahte-model boru hattıyla test edildi. Gerçek modelle uçtan uca gözlem için kullanıcı makinesinde: `python tests/live_smoke.py` (5 senaryo, kural kontrolleri otomatik).
+
+## Bilinen küçük kararlar
+
+- `phone_hd` preset'i tabloya sadık kalarak oran "9:16" etiketiyle 1440x3120 hedefler (gerçek oran 9:19.5'tir; tablo verisi korundu).
+- Varsayılan port 8765 (8188=ComfyUI ve 11434=Ollama ile çakışmasın diye).
+- Pony rehberi hem `score_9…` (Pony) hem `masterpiece, best quality` (Illustrious) kalite bloklarını öğretir — iki checkpoint türünde de güvenli.
+- `frontend/dist` her zaman tek bir güncel build içerir; `index.html` hash'li dosya adlarıyla eşleşmelidir. Arayüzü değiştirip yeniden derlerseniz eski hash'li dosyaları silmek yeterlidir.
