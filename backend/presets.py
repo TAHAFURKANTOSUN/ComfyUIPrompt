@@ -15,6 +15,14 @@ def load_formats() -> dict:
     return {f["id"]: f for f in _load("formats.json")["formats"]}
 
 
+def default_format_id(formats: dict) -> str | None:
+    """formats.json'daki 'default' alanı; silinmiş/yanlışsa ilk preset."""
+    wanted = _load("formats.json").get("default")
+    if wanted in formats:
+        return wanted
+    return next(iter(formats), None)
+
+
 def load_families():
     """(id -> model ailesi sözlüğü, varsayılan aile id'si)"""
     raw = _load("model_families.json")

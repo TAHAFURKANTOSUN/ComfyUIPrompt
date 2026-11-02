@@ -36,6 +36,16 @@ function loadLS(key, fallback) {
   }
 }
 
+// Gizli pencere / kota dolu / depolama engelli durumlarında setItem hata
+// fırlatabilir; bu, tüm uygulamayı çökertmemeli.
+function saveLS(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    /* kalıcılık olmadan devam et */
+  }
+}
+
 let msgSeq = 0;
 const nextId = () => `m${Date.now()}_${msgSeq++}`;
 
@@ -93,16 +103,19 @@ export default function App() {
     }
   }, [settings.model, settings.baseUrl, settings.visionModel]);
 
+  // Ayarlarda adres/model yazılırken her tuş vuruşunda istek atmamak için
+  // durum sorgusu kısa bir gecikmeyle (debounce) yapılır.
   useEffect(() => {
-    refreshStatus();
+    const t = setTimeout(refreshStatus, 400);
+    return () => clearTimeout(t);
   }, [refreshStatus]);
 
   // --- kalıcılık ---
   useEffect(() => {
-    localStorage.setItem(LS_SETTINGS, JSON.stringify(settings));
+    saveLS(LS_SETTINGS, settings);
   }, [settings]);
   useEffect(() => {
-    localStorage.setItem(LS_FAVS, JSON.stringify(favs));
+    saveLS(LS_FAVS, favs);
   }, [favs]);
 
   // --- otomatik kaydırma ---
@@ -134,11 +147,15 @@ export default function App() {
 
   // --- gönderme ---
   const send = async (textOverride) => {
-    const text = (textOverride ?? input).trim();
-    const img = textOverride ? null : image;
+    const fromExample = typeof textOverride === "string";
+    const text = (fromExample ? textOverride : input).trim();
+    const img = fromExample ? null : image;
     if ((!text && !img) || busy || !formatId) return;
-    setInput("");
-    setImage(null);
+    // Örnek isteğe tıklanınca kullanıcının yazdığı metin/eklediği görsel silinmesin.
+    if (!fromExample) {
+      setInput("");
+      setImage(null);
+    }
     push({ role: "user", kind: "chat", text, image: img });
     setBusy(true);
     try {
@@ -168,6 +185,7 @@ export default function App() {
     if (sessionId) api.reset(sessionId).catch(() => {});
     setSessionId(null);
     setMsgs([]);
+    setImage(null);
   };
 
   const changeFormat = (id) => {
@@ -258,6 +276,7 @@ export default function App() {
         <button
           onClick={() => setShowFavs(true)}
           title="Favoriler"
+          aria-label="Favoriler"
           className="relative rounded-lg border border-slate-800 bg-slate-900 p-1.5 text-slate-300 hover:border-slate-700"
         >
           <Star size={15} />
@@ -270,6 +289,7 @@ export default function App() {
         <button
           onClick={() => setShowSettings(true)}
           title="Ayarlar"
+          aria-label="Ayarlar"
           className="rounded-lg border border-slate-800 bg-slate-900 p-1.5 text-slate-300 hover:border-slate-700"
         >
           <Settings size={15} />
@@ -277,6 +297,7 @@ export default function App() {
         <button
           onClick={newChat}
           title="Yeni sohbet"
+          aria-label="Yeni sohbet"
           className="rounded-lg border border-slate-800 bg-slate-900 p-1.5 text-slate-300 hover:border-slate-700"
         >
           <RotateCcw size={15} />
@@ -311,8 +332,11 @@ export default function App() {
           })}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <label className="text-[11px] font-medium text-slate-500">Model ailesi:</label>
+          <label htmlFor="family-select" className="text-[11px] font-medium text-slate-500">
+            Model ailesi:
+          </label>
           <select
+            id="family-select"
             value={familyId ?? ""}
             onChange={(e) => changeFamily(e.target.value)}
             className="rounded-lg border border-slate-800 bg-slate-900 px-2.5 py-1.5 text-xs font-medium text-slate-100 outline-none transition focus:border-indigo-500"
@@ -443,6 +467,7 @@ export default function App() {
               <button
                 onClick={() => setImage(null)}
                 title="Görseli kaldır"
+                aria-label="Görseli kaldır"
                 className="absolute -right-2 -top-2 rounded-full border border-slate-600 bg-slate-800 p-0.5 text-slate-300 hover:bg-rose-600 hover:text-white"
               >
                 <X size={12} />
@@ -473,6 +498,8 @@ export default function App() {
           <button
             onClick={() => setShowStyles((v) => !v)}
             title="Stil kütüphanesi"
+            aria-label="Stil kütüphanesi"
+            aria-pressed={showStyles}
             className={
               "shrink-0 rounded-xl border p-2.5 transition " +
               (showStyles
@@ -485,6 +512,7 @@ export default function App() {
           <button
             onClick={() => fileRef.current?.click()}
             title="Görsel ekle — görselden prompt tahmini"
+            aria-label="Görsel ekle"
             className={
               "shrink-0 rounded-xl border p-2.5 transition " +
               (image
@@ -506,6 +534,7 @@ export default function App() {
           />
           <textarea
             ref={inputRef}
+            aria-label="Mesaj"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
@@ -536,6 +565,7 @@ export default function App() {
             disabled={busy || (!input.trim() && !image)}
             className="shrink-0 rounded-xl bg-indigo-600 p-2.5 text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
             title="Gönder (Enter)"
+            aria-label="Gönder"
           >
             <Send size={16} />
           </button>

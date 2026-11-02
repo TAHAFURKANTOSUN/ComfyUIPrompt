@@ -22,7 +22,19 @@ DEFAULTS = {
         "keep_alive": "5m",
         "timeout_s": 300,
     },
-    "server": {"host": "127.0.0.1", "port": 8765},
+    "server": {
+        "host": "127.0.0.1",
+        "port": 8765,
+        # Tarayıcıdan API'ye çapraz-köken (CORS) erişimine izin verilen kökenler.
+        # Arayüz backend'in kendisinden sunulduğu (ve geliştirmede Vite proxy'si
+        # kullanıldığı) için varsayılan olarak boştur: başka bir web sitesi bu yerel
+        # API'yi kullanıp Ollama/ComfyUI'ye istek gönderemez.
+        "cors_origins": [],
+        # Host başlığı izin listesi (DNS rebinding koruması). Sunucu yalnızca
+        # loopback'e bağlıyken uygulanır; LAN'dan erişim için host'u 0.0.0.0 yapıp
+        # buraya makinenin adını/IP'sini ekleyin ya da ["*"] verin.
+        "allowed_hosts": ["127.0.0.1", "localhost", "::1"],
+    },
 }
 
 
@@ -44,11 +56,20 @@ def load_config() -> dict:
         "OLLAMA_BASE_URL": ("llm", "base_url"),
         "LLM_BASE_URL": ("llm", "base_url"),
         "LLM_MODEL": ("llm", "model"),
+        "LLM_VISION_MODEL": ("llm", "vision_model"),
         "LLM_MODE": ("llm", "mode"),
+        "HOST": ("server", "host"),
         "PORT": ("server", "port"),
     }
     for env, (section, key) in env_map.items():
         raw = os.environ.get(env)
-        if raw:
-            cfg[section][key] = int(raw) if key == "port" else raw
+        if not raw:
+            continue
+        if key == "port":
+            try:
+                cfg[section][key] = int(raw)
+            except ValueError:
+                print(f"[config] Gecersiz {env}={raw!r}, yok sayiliyor.")
+        else:
+            cfg[section][key] = raw
     return cfg

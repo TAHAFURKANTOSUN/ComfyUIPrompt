@@ -18,6 +18,8 @@ import httpx
 
 _THINK_RE = re.compile(r"<think>.*?(?:</think>|$)", re.S)
 
+DEFAULT_VISION_MODEL = "qwen2.5vl:7b"
+
 # Modelin döndürmesi gereken JSON'un şeması (Ollama structured outputs).
 JSON_SCHEMA = {
     "type": "object",
@@ -53,8 +55,55 @@ def _merged(cfg_llm: dict, overrides: dict | None) -> dict:
     for key in ("model", "base_url", "mode", "vision_model"):
         if overrides and overrides.get(key):
             cfg[key] = overrides[key]
-    cfg["base_url"] = cfg["base_url"].rstrip("/")
+    cfg["base_url"] = (cfg.get("base_url") or "").strip().rstrip("/")
+    if not cfg["base_url"]:
+        raise LLMError("bad_config", "LLM sunucu adresi (base_url) boş.", "Ayarlar'dan veya config.json'dan adresi girin.")
     return cfg
+
+
+def _json(resp: httpx.Response) -> dict:
+    """Yanıtı JSON olarak çözer; JSON değilse anlaşılır bir LLMError fırlatır."""
+    try:
+        data = resp.json()
+    except ValueError:
+        raise LLMError("llm_error", f"LLM sunucusu JSON olmayan bir yanıt döndürdü: {resp.text[:200]}")
+    if not isinstance(data, dict):
+        raise LLMError("llm_error", f"Beklenmeyen yanıt biçimi: {str(data)[:200]}")
+    return data
+
+
+def _net_error(cfg: dict, exc: Exception, what: str = "LLM") -> LLMError:
+    """httpx ağ hatalarını kullanıcıya gösterilecek LLMError'a çevirir."""
+    if isinstance(exc, httpx.TimeoutException):
+        return LLMError(
+            "timeout",
+            f"{what} yanıtı zaman aşımına uğradı.",
+            "Daha küçük bir model deneyin (ör. qwen3:8b) veya config.json'da timeout_s değerini artırın.",
+        )
+    if isinstance(exc, httpx.ConnectError):
+        if cfg.get("mode") == "openai":
+            return LLMError(
+                "unreachable",
+                f"LLM sunucusuna ulaşılamıyor ({cfg['base_url']}).",
+                "Sunucunun (LM Studio / llama.cpp / Ollama) çalıştığından emin olun.",
+            )
+        return LLMError(
+            "unreachable",
+            f"Ollama'ya ulaşılamıyor ({cfg['base_url']}).",
+            "Ollama'nın kurulu ve çalışır olduğundan emin olun: `ollama serve`",
+        )
+    return LLMError("llm_error", f"{what} isteği ağ hatasıyla kesildi: {str(exc)[:200]}")
+
+
+def _model_matches(wanted: str, installed: list) -> bool:
+    """Ollama etiket kuralı: 'qwen3' == 'qwen3:latest'. Farklı boyut etiketi
+    (qwen3:8b vs qwen3:14b) eşleşme SAYILMAZ — aksi halde yüklü olmayan bir
+    model 'yüklü' görünür ve ilk istekte 404 alınır."""
+    def norm(name: str) -> str:
+        name = (name or "").strip()
+        return name if ":" in name.rsplit("/", 1)[-1] else f"{name}:latest"
+    w = norm(wanted)
+    return any(norm(m) == w for m in installed)
 
 
 def _timeout(cfg: dict) -> httpx.Timeout:
@@ -88,20 +137,10 @@ async def _chat_ollama(cfg: dict, messages: list) -> str:
                 payload["format"] = fmt
             try:
                 resp = await client.post(url, json=payload)
-            except httpx.ConnectError:
-                raise LLMError(
-                    "unreachable",
-                    f"Ollama'ya ulaşılamıyor ({cfg['base_url']}).",
-                    "Ollama'nın kurulu ve çalışır olduğundan emin olun: `ollama serve`",
-                )
-            except httpx.TimeoutException:
-                raise LLMError(
-                    "timeout",
-                    "LLM yanıtı zaman aşımına uğradı.",
-                    "Daha küçük bir model deneyin (ör. qwen3:8b) veya config.json'da timeout_s değerini artırın.",
-                )
+            except httpx.HTTPError as exc:
+                raise _net_error(cfg, exc)
             if resp.status_code < 400:
-                data = resp.json()
+                data = _json(resp)
                 return (data.get("message") or {}).get("content", "") or data.get("response", "")
             body = resp.text
             if resp.status_code == 404 or "not found" in body.lower():
@@ -111,6 +150,10 @@ async def _chat_ollama(cfg: dict, messages: list) -> str:
                     f"Şu komutla indirin: `ollama pull {cfg['model']}`",
                 )
             last_err = f"HTTP {resp.status_code}: {body[:300]}"
+            if resp.status_code >= 500 and "format" not in body.lower():
+                # Sunucu tarafı hata (ör. bellek yetersiz) — format düşüşüyle düzelmez,
+                # aynı ağır isteği 3 kez tekrarlamanın anlamı yok.
+                break
             # format parametresi desteklenmiyor olabilir -> bir sonraki moda düş
         raise LLMError("llm_error", f"LLM isteği başarısız oldu. {last_err}")
 
@@ -130,32 +173,36 @@ async def _chat_openai(cfg: dict, messages: list) -> str:
                 body["response_format"] = {"type": "json_object"}
             try:
                 resp = await client.post(url, json=body)
-            except httpx.ConnectError:
-                raise LLMError(
-                    "unreachable",
-                    f"LLM sunucusuna ulaşılamıyor ({cfg['base_url']}).",
-                    "Sunucunun (LM Studio / llama.cpp / Ollama) çalıştığından emin olun.",
-                )
-            except httpx.TimeoutException:
-                raise LLMError("timeout", "LLM yanıtı zaman aşımına uğradı.")
+            except httpx.HTTPError as exc:
+                raise _net_error(cfg, exc)
             if resp.status_code < 400:
-                data = resp.json()
+                data = _json(resp)
                 try:
                     return data["choices"][0]["message"]["content"] or ""
-                except (KeyError, IndexError):
+                except (KeyError, IndexError, TypeError):
                     raise LLMError("llm_error", f"Beklenmeyen yanıt biçimi: {str(data)[:300]}")
+            if resp.status_code == 404:
+                raise LLMError(
+                    "model_not_found",
+                    f"'{cfg['model']}' modeli sunucuda bulunamadı (veya uç nokta yok).",
+                    "Sunucuda yüklü model adını Ayarlar'dan seçin.",
+                )
             if not use_rf:
                 raise LLMError("llm_error", f"HTTP {resp.status_code}: {resp.text[:300]}")
         raise LLMError("llm_error", "LLM isteği başarısız oldu.")
 
 
 async def describe_image(
-    cfg_llm: dict, image_b64: str, instruction: str, overrides: dict | None = None
+    cfg_llm: dict,
+    image_b64: str,
+    instruction: str,
+    overrides: dict | None = None,
+    mime: str = "image/jpeg",
 ) -> str:
     """Görseli çok-modlu (vision) modelle ayrıntılı İngilizce tarife çevirir.
     Dönen tarif, normal sohbet boru hattına kullanıcı mesajı içinde verilir."""
     cfg = _merged(cfg_llm, overrides)
-    model = cfg.get("vision_model") or "qwen2.5vl:7b"
+    model = cfg.get("vision_model") or DEFAULT_VISION_MODEL
 
     if cfg.get("mode") == "openai":
         url = f"{cfg['base_url']}/v1/chat/completions"
@@ -166,7 +213,7 @@ async def describe_image(
                 "content": [
                     {"type": "text", "text": instruction},
                     {"type": "image_url",
-                     "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+                     "image_url": {"url": f"data:{mime};base64,{image_b64}"}},
                 ],
             }],
             "temperature": 0.3,
@@ -185,18 +232,14 @@ async def describe_image(
     async with httpx.AsyncClient(trust_env=False, timeout=_timeout(cfg)) as client:
         try:
             resp = await client.post(url, json=payload)
-        except httpx.ConnectError:
-            raise LLMError(
-                "unreachable",
-                f"Ollama'ya ulaşılamıyor ({cfg['base_url']}).",
-                "Ollama'nın kurulu ve çalışır olduğundan emin olun: `ollama serve`",
-            )
         except httpx.TimeoutException:
             raise LLMError(
                 "timeout",
                 "Görsel analizi zaman aşımına uğradı.",
                 "Daha küçük bir vision modeli deneyin (ör. qwen2.5vl:3b).",
             )
+        except httpx.HTTPError as exc:
+            raise _net_error(cfg, exc, "Görsel analizi")
 
     if resp.status_code >= 400:
         body = resp.text
@@ -214,11 +257,11 @@ async def describe_image(
             )
         raise LLMError("llm_error", f"Görsel analizi başarısız: HTTP {resp.status_code}: {body[:300]}")
 
-    data = resp.json()
+    data = _json(resp)
     if cfg.get("mode") == "openai":
         try:
             text = data["choices"][0]["message"]["content"] or ""
-        except (KeyError, IndexError):
+        except (KeyError, IndexError, TypeError):
             text = ""
     else:
         text = (data.get("message") or {}).get("content", "") or data.get("response", "")
@@ -230,7 +273,13 @@ async def describe_image(
 
 async def status(cfg_llm: dict, overrides: dict | None = None) -> dict:
     """Sunucu erişilebilir mi + yüklü modeller."""
-    cfg = _merged(cfg_llm, overrides)
+    try:
+        cfg = _merged(cfg_llm, overrides)
+    except LLMError as exc:
+        return {"ok": False, "mode": cfg_llm.get("mode", "ollama"), "base_url": "",
+                "configured_model": cfg_llm.get("model"), "models": [], "model_available": False,
+                "vision_model": cfg_llm.get("vision_model") or DEFAULT_VISION_MODEL,
+                "vision_available": False, "error": exc.message}
     result = {
         "ok": False,
         "mode": cfg.get("mode", "ollama"),
@@ -238,7 +287,7 @@ async def status(cfg_llm: dict, overrides: dict | None = None) -> dict:
         "configured_model": cfg["model"],
         "models": [],
         "model_available": False,
-        "vision_model": cfg.get("vision_model") or "qwen2.5vl:7b",
+        "vision_model": cfg.get("vision_model") or DEFAULT_VISION_MODEL,
         "vision_available": False,
         "error": None,
     }
@@ -253,13 +302,8 @@ async def status(cfg_llm: dict, overrides: dict | None = None) -> dict:
                 resp.raise_for_status()
                 result["models"] = [m.get("name", "") for m in resp.json().get("models", [])]
         result["ok"] = True
-
-        def _has(name: str) -> bool:
-            stem = name.split(":")[0]
-            return any(m == name or m.split(":")[0] == stem for m in result["models"])
-
-        result["model_available"] = _has(cfg["model"])
-        result["vision_available"] = _has(result["vision_model"])
+        result["model_available"] = _model_matches(cfg["model"], result["models"])
+        result["vision_available"] = _model_matches(result["vision_model"], result["models"])
     except Exception as exc:
         result["error"] = str(exc)[:200]
     return result
@@ -268,7 +312,10 @@ async def status(cfg_llm: dict, overrides: dict | None = None) -> dict:
 async def unload(cfg_llm: dict, overrides: dict | None = None) -> dict:
     """Modeli bellekten boşaltır (VRAM'i ComfyUI'ye bırakmak için).
     Ollama'da keep_alive=0 ile boş bir istek göndermek modeli kaldırır."""
-    cfg = _merged(cfg_llm, overrides)
+    try:
+        cfg = _merged(cfg_llm, overrides)
+    except LLMError as exc:
+        return {"ok": False, "message": exc.message}
     if cfg.get("mode") == "openai":
         return {"ok": False, "message": "Bellek boşaltma yalnızca Ollama modunda destekleniyor."}
     targets = [cfg["model"]]

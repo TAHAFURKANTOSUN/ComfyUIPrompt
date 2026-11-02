@@ -13,7 +13,6 @@ Kullanım:
 """
 import argparse
 import base64
-import json
 import sys
 
 import httpx
@@ -73,14 +72,15 @@ def main():
             if s["family_id"] != fam:
                 problems.append(f"{title}: aile uyuşmazlığı")
             print(f"  [kontrol] çözünürlük={s['gen']} hedef={s['target']} negative={'yok' if pkg['negative'] is None else 'var'}")
-        elif last and last["type"] == "chat" and len(turns) == len([1]):
-            pass
+        elif last and last["type"] == "chat":
+            print("  [bilgi] Senaryo soru turunda bitti (model daha fazla bilgi istedi).")
 
     if args.image:
         print("\n" + "=" * 70 + "\n▶ Görselden prompt (vision)  (format=phone, aile=sdxl)")
         if not st.get("vision_available"):
             print(f"  Uyarı: vision modeli ({st.get('vision_model')}) yüklü görünmüyor — `ollama pull {st.get('vision_model')}`")
-        b64 = base64.b64encode(open(args.image, "rb").read()).decode()
+        with open(args.image, "rb") as fh:
+            b64 = base64.b64encode(fh.read()).decode()
         r = httpx.post(f"{base}/api/chat", json={
             "message": "", "image": b64, "format_id": "phone", "family_id": "sdxl",
         }, timeout=600, trust_env=False)

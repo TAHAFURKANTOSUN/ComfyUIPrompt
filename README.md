@@ -62,7 +62,7 @@ Python 3.10+ ve [Ollama](https://ollama.com) yeterlidir. Node.js **gerekmez** �
    Görselden prompt tahmini de kullanacaksanız bir de çok-modlu (vision) model indirin:
    `ollama pull qwen2.5vl:7b` (8 GB altı VRAM için: `ollama pull qwen2.5vl:3b`).
 
-2. **`start.bat`'a çift tıklayın** (Windows) ya da `./start.sh` çalıştırın (Linux/macOS). İlk açılışta Python bağımlılıklarını kendisi kurar.
+2. **`start.bat`'a çift tıklayın** (Windows) ya da `./start.sh` çalıştırın (Linux/macOS). İlk açılışta proje klasöründe bir `.venv` sanal ortamı oluşturup Python bağımlılıklarını oraya kurar (sistem Python'unuza dokunmaz; yeni Debian/Ubuntu/Homebrew sürümlerindeki "externally-managed-environment" hatası da böylece yaşanmaz).
 
 3. Tarayıcıda **http://127.0.0.1:8765** adresini açın.
 
@@ -96,15 +96,27 @@ Yazma alanındaki resim simgesine tıklayarak (ya da panodan yapıştırarak / s
 ## ⚙️ Yapılandırma
 
 - **`config.json`** — LLM adresi/modeli, görsel analizi için `vision_model`, `keep_alive`, zaman aşımı, sunucu portu. `llm.mode` alanını `"openai"` yaparak LM Studio / llama.cpp server gibi OpenAI-uyumlu yerel sunuculara da bağlanabilirsiniz (vision dahil).
-- **`presets/formats.json`** — format preset'leri. Yeni bir satır ekleyerek (id, ad, oran, `target`, `gen`, `gen_sd15`, ikon) kod değişikliği olmadan yeni preset tanımlayabilirsiniz; sunucuyu yeniden başlatmak bile gerekmez.
+- **`presets/formats.json`** — format preset'leri. Yeni bir satır ekleyerek (id, ad, oran, `target`, `gen`, `gen_sd15`, ikon) kod değişikliği olmadan yeni preset tanımlayabilirsiniz; sunucuyu yeniden başlatmak bile gerekmez. Arayüzde ilk seçili gelen preset `default` alanıyla belirlenir.
 - **`presets/model_families.json`** — model aileleri, sampler/steps/cfg varsayılanları ve her ailenin prompt stili rehberi (`llm_guidance`).
 - **`presets/styles.json`** — stil kütüphanesi çipleri.
+
+**Ortam değişkenleri** (`config.json`'u ezer): `OLLAMA_BASE_URL` / `LLM_BASE_URL`, `LLM_MODEL`, `LLM_VISION_MODEL`, `LLM_MODE`, `HOST`, `PORT`.
+
+### 🔐 Güvenlik ve ağdan erişim
+
+Sunucu varsayılan olarak yalnızca `127.0.0.1`'i dinler ve iki koruma uygular:
+
+- **CORS kapalıdır** (`server.cors_origins: []`): arayüz zaten aynı adresten sunulduğu için gerekmez. Böylece tarayıcıda açtığınız başka bir web sitesi bu yerel API üzerinden Ollama'nıza/ComfyUI'nize istek gönderemez.
+- **Host başlığı kontrolü** (`server.allowed_hosts`): DNS rebinding saldırılarına karşı yalnızca `127.0.0.1`, `localhost`, `::1` kabul edilir.
+
+Arayüzü telefon/başka bir bilgisayardan açmak isterseniz `server.host`'u `"0.0.0.0"` yapın (bu durumda Host kontrolü uygulanmaz; yalnızca güvendiğiniz ağlarda kullanın). Uygulamada kimlik doğrulama yoktur.
 
 SD 1.5 için tabloya ek olarak ayrı bir taban çözünürlük (`gen_sd15`) tutulur; SD 1.5, SDXL tabanı olan ~1344px'te özne kopyalama yaptığı için asistan bu ailede otomatik olarak 512–768px tabanına iner ve hedefe upscale önerir.
 
 ## ✅ Testler
 
-- `python tests/test_acceptance.py` — sahte bir Ollama sunucusuyla tüm kabul kriterlerini uçtan uca doğrular (görselden-prompt akışı dahil 52 kontrol; gerçek model gerektirmez).
+- `python tests/test_acceptance.py` — sahte bir Ollama sunucusuyla tüm kabul kriterlerini uçtan uca doğrular (görselden-prompt akışı ve güvenlik/sağlamlık regresyonları dahil 69 kontrol; gerçek model gerektirmez). Sahte sunucu boş bir portta açılır, makinenizde gerçek Ollama çalışıyor olsa da çakışmaz.
+- Her push/PR'da GitHub Actions bu testleri (Python 3.10 ve 3.13) ve frontend build'ini otomatik çalıştırır (`.github/workflows/tests.yml`).
 - `python tests/live_smoke.py` — gerçek Ollama'yla 5 canlı senaryo koşturur (önce `python -m backend.main` ile sunucuyu açın). `--image bir_resim.jpg` ile görselden-prompt senaryosu da eklenir.
 
 ## 🐛 Sorun giderme
@@ -113,7 +125,9 @@ SD 1.5 için tabloya ek olarak ayrı bir taban çözünürlük (`gen_sd15`) tutu
 - **"... modeli Ollama'da yüklü değil"** — Hata mesajındaki `ollama pull …` komutunu çalıştırın.
 - **"Görsel analizi için '…' modeli yüklü değil"** — Vision modelini indirin: `ollama pull qwen2.5vl:7b`, ya da Ayarlar'dan yüklü çok-modlu bir model seçin.
 - **Port 8765 dolu** — `config.json` → `server.port` değerini değiştirin.
-- **Arayüzü değiştirmek istiyorum** — Kaynak `frontend/src` içindedir; Node.js kurup `cd frontend && npm install && npm run build` ile yeniden derleyin (yalnızca geliştirme için gerekir).
+- **"Geçersiz Host başlığı"** — Arayüzü `127.0.0.1`/`localhost` dışında bir adla açıyorsunuz; adı `config.json` → `server.allowed_hosts` listesine ekleyin.
+- **`./start.sh: Permission denied`** — `chmod +x start.sh` çalıştırın ya da `bash start.sh` ile başlatın.
+- **Arayüzü değiştirmek istiyorum** — Kaynak `frontend/src` içindedir; Node.js kurup `cd frontend && npm ci && npm run build` ile yeniden derleyin (yalnızca geliştirme için gerekir). Geliştirme sırasında `npm run dev` (Vite, `/api` isteklerini 8765'e yönlendirir) kullanılabilir.
 
 ## 📁 Proje yapısı
 
@@ -134,8 +148,8 @@ SD 1.5 için tabloya ek olarak ayrı bir taban çözünürlük (`gen_sd15`) tutu
 Hata bildirimi ve öneriler için Issues bölümü kullanılabilir. Pull request göndermeden önce büyük değişiklikler için önce bir issue açıp konuşulması önerilir. Kod üzerinde çalışırken:
 
 - Mimari kararların gerekçesi için önce `NOTES.md`'ye bakın — özellikle "deterministik çekirdek + LLM protokolü" ayrımı (bkz. madde 2) LLM'in şablon/çözünürlük/sampler değerlerini asla doğrudan üretmediğini, bunların `presets/*.json`'dan geldiğini garanti eder; bu ayrımı bozmayan değişiklikler tercih edilir.
-- Frontend değişiklikleri `frontend/src` içinde yapılıp `npm run build` ile `frontend/dist` güncellenmelidir (derlenmiş çıktı repoya dahildir).
-- Göndermeden önce `python tests/test_acceptance.py`'nin 52 kontrolü de geçtiğinden emin olun; davranışı değiştiren PR'larda ilgili teste de bir kontrol eklenmesi beklenir.
+- Frontend değişiklikleri `frontend/src` içinde yapılıp `npm run build` ile `frontend/dist` güncellenmelidir (derlenmiş çıktı repoya dahildir). Bağımlılık sürümleri `frontend/package-lock.json` ile sabitlenmiştir; `npm install` yerine `npm ci` kullanın.
+- Göndermeden önce `python tests/test_acceptance.py`'nin 69 kontrolü de geçtiğinden emin olun; davranışı değiştiren PR'larda ilgili teste de bir kontrol eklenmesi beklenir.
 
 ## 📄 Lisans
 

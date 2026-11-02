@@ -1,5 +1,6 @@
 {
-  "_comment": "Format preset'leri. Yeni preset eklemek için bu listeye yeni bir obje ekleyin — kod değişikliği gerekmez. 'gen' = SDXL/Flux üretim (taban) çözünürlüğü, 'gen_sd15' = SD 1.5 için güvenli taban (SD1.5 yüksek çözünürlükte özne kopyalar), 'target' = nihai hedef (upscale sonrası). 'icon' frontend'deki ikon adıdır (bkz. frontend/src/icons.jsx).",
+  "_comment": "Format preset'leri. Yeni preset eklemek için bu listeye yeni bir obje ekleyin — kod değişikliği gerekmez. 'gen' = SDXL/Flux üretim (taban) çözünürlüğü, 'gen_sd15' = SD 1.5 için güvenli taban (SD1.5 yüksek çözünürlükte özne kopyalar), 'target' = nihai hedef (upscale sonrası). 'icon' frontend'deki ikon adıdır (bkz. frontend/src/icons.jsx). 'default' arayüzde ilk seçili gelen preset'in id'sidir (listede yoksa ilk preset kullanılır).",
+  "default": "desktop_fhd",
   "formats": [
     {
       "id": "desktop_fhd",

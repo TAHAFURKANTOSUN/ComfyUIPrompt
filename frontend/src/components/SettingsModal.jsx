@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Loader2, RefreshCw, X, Zap } from "lucide-react";
 import { api } from "../api.js";
+import useEscape from "../useEscape.js";
 
 const inputCls =
   "w-full rounded-md border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-sm text-slate-100 " +
@@ -21,6 +22,8 @@ export default function SettingsModal({
   const [unloadMsg, setUnloadMsg] = useState(null);
   const [statusBusy, setStatusBusy] = useState(false);
 
+  useEscape(open, onClose);
+
   if (!open) return null;
 
   const set = (key) => (e) => setSettings((s) => ({ ...s, [key]: e.target.value }));
@@ -36,10 +39,13 @@ export default function SettingsModal({
     setCkptErr(null);
     try {
       const r = await api.comfyCheckpoints(settings.comfyUrl || "http://127.0.0.1:8188");
-      setCkpts(r.checkpoints || []);
-      if (!r.checkpoints?.length) setCkptErr("Sunucuda hiç checkpoint bulunamadı.");
-      else if (!settings.checkpoint)
-        setSettings((s) => ({ ...s, checkpoint: r.checkpoints[0] }));
+      const list = r.checkpoints || [];
+      setCkpts(list);
+      if (!list.length) setCkptErr("Sunucuda hiç checkpoint bulunamadı.");
+      // Kayıtlı checkpoint bu sunucuda yoksa (silinmiş / farklı sunucu) ilkini seç;
+      // aksi halde açılır liste bir şey gösterip başka bir değer gönderirdi.
+      else if (!list.includes(settings.checkpoint))
+        setSettings((s) => ({ ...s, checkpoint: list[0] }));
     } catch (e) {
       setCkptErr(e.message + (e.hint ? ` — ${e.hint}` : ""));
     }
@@ -51,6 +57,7 @@ export default function SettingsModal({
     const body = {};
     if (settings.model) body.model = settings.model;
     if (settings.baseUrl) body.base_url = settings.baseUrl;
+    if (settings.visionModel) body.vision_model = settings.visionModel;
     try {
       const r = await api.unload(body);
       setUnloadMsg(r.message);
@@ -67,12 +74,19 @@ export default function SettingsModal({
       onClick={onClose}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settings-title"
         className="max-h-[92vh] w-full max-w-lg overflow-y-auto rounded-t-2xl border border-slate-800 bg-slate-900 p-4 shadow-2xl sm:rounded-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-slate-100">Ayarlar</h2>
-          <button onClick={onClose} className="rounded-md p-1 text-slate-400 hover:bg-slate-800">
+          <h2 id="settings-title" className="text-sm font-semibold text-slate-100">Ayarlar</h2>
+          <button
+            onClick={onClose}
+            aria-label="Kapat"
+            className="rounded-md p-1 text-slate-400 hover:bg-slate-800"
+          >
             <X size={16} />
           </button>
         </div>

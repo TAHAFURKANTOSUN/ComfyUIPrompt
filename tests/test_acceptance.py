@@ -1,12 +1,16 @@
 """Bölüm 10 kabul kriterleri — uçtan uca doğrulama.
 
-Sahte Ollama (tests/mock_ollama.py) 11434 portunda gerçek HTTP sunucusu olarak
-çalıştırılır; backend TestClient ile gerçek istek/yanıt döngüsünden geçirilir.
+Sahte Ollama (tests/mock_ollama.py) boş bir yerel portta gerçek HTTP sunucusu
+olarak çalıştırılır (makinede gerçek Ollama 11434'te açık olsa bile çakışmaz);
+backend TestClient ile gerçek istek/yanıt döngüsünden geçirilir.
 Yalnızca modelin kendisi kurgudur — istemci, ayrıştırıcı, guard'lar, şablon ve
 API katmanının tamamı gerçektir.
 
 Çalıştırma (proje kökünden):  python3 tests/test_acceptance.py
 """
+import asyncio
+import os
+import socket
 import subprocess
 import sys
 import time
@@ -15,11 +19,23 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+MOCK_PORT = _free_port()
+MOCK_URL = f"http://127.0.0.1:{MOCK_PORT}"
+# Backend config'i her istekte okur; ortam değişkeni config.json'u ezer.
+os.environ["OLLAMA_BASE_URL"] = MOCK_URL
+
 import httpx  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from backend import prompting  # noqa: E402
-from backend.main import app  # noqa: E402
+from backend import comfyui, llm_client, prompting  # noqa: E402
+from backend.main import SESSIONS, app  # noqa: E402
 
 PASS, FAIL = [], []
 
@@ -32,12 +48,14 @@ def check(name: str, cond: bool, detail: str = ""):
 def start_mock():
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "tests.mock_ollama:app",
-         "--host", "127.0.0.1", "--port", "11434", "--log-level", "error"],
+         "--host", "127.0.0.1", "--port", str(MOCK_PORT), "--log-level", "error"],
         cwd=str(ROOT),
     )
     for _ in range(60):
+        if proc.poll() is not None:
+            raise RuntimeError("Sahte Ollama süreci beklenmedik şekilde kapandı")
         try:
-            httpx.get("http://127.0.0.1:11434/api/tags", timeout=1, trust_env=False)
+            httpx.get(f"{MOCK_URL}/api/tags", timeout=1, trust_env=False)
             return proc
         except Exception:
             time.sleep(0.25)
@@ -56,11 +74,15 @@ def chat(client, message, format_id, family_id, session_id=None):
 
 def main():
     mock = start_mock()
-    client = TestClient(app)
+    # Host başlığı koruması loopback dışını reddeder; TestClient'ın varsayılan
+    # "testserver" host'u yerine gerçek kullanımdaki adresi taklit et.
+    client = TestClient(app, base_url="http://127.0.0.1:8765")
     try:
         run_all(client)
+        run_review_checks(client)
     finally:
         mock.terminate()
+        mock.wait(timeout=10)
 
     print(f"\nSONUÇ: {len(PASS)} başarılı, {len(FAIL)} başarısız")
     if FAIL:
@@ -224,6 +246,109 @@ def run_all(client):
     # varsayılan aile (family_id gönderilmezse SDXL)
     rdef = client.post("/api/chat", json={"message": "orman", "format_id": "phone"}).json()
     check("aile seçilmezse varsayılan SDXL", rdef["package"]["settings"]["family_id"] == "sdxl")
+
+
+def run_review_checks(client):
+    """Kod incelemesinde bulunan hataların regresyon kontrolleri."""
+    print("\n[R] İnceleme düzeltmeleri (güvenlik / sağlamlık)")
+
+    # Güvenlik: başka bir site API'yi tarayıcı üzerinden kullanamamalı.
+    pre = client.options("/api/chat", headers={
+        "Origin": "https://kotu-site.example", "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "content-type"})
+    check("CORS: yabancı kökene izin verilmiyor",
+          pre.headers.get("access-control-allow-origin") is None, str(dict(pre.headers))[:200])
+    reb = client.get("/api/config", headers={"Host": "kotu-site.example"})
+    check("DNS rebinding: yabancı Host başlığı reddediliyor", reb.status_code == 400)
+    ok_hosts = all(client.get("/api/config", headers={"Host": h}).status_code == 200
+                   for h in ("127.0.0.1:8765", "localhost:5173", "[::1]:8765"))
+    check("loopback Host başlıkları kabul ediliyor", ok_hosts)
+
+    # Model eşleşmesi: qwen3:8b yüklü diye qwen3:14b 'yüklü' sayılmamalı.
+    st = client.get("/api/llm/status", params={"model": "qwen3:14b"}).json()
+    check("status: farklı boyut etiketi 'yüklü' sayılmıyor", st["ok"] and not st["model_available"])
+    st = client.get("/api/llm/status", params={"model": "qwen3:8b"}).json()
+    check("status: tam eşleşen model 'yüklü'", st["model_available"])
+    check("model eşleşmesi: etiketsiz ad ':latest' sayılıyor",
+          llm_client._model_matches("llava", ["llava:latest"])
+          and not llm_client._model_matches("llava", ["llava:13b"]))
+
+    # Geçmişe <think> blokları yazılmamalı.
+    r = chat(client, "sisli bir orman", "phone", "sdxl")
+    hist = SESSIONS[r["session_id"]]["messages"]
+    check("sohbet geçmişinde <think> bloğu saklanmıyor",
+          all("<think>" not in m["content"] for m in hist))
+
+    # Girdi doğrulama.
+    big = client.post("/api/chat", json={"message": "x" * 9000, "format_id": "phone"})
+    check("aşırı uzun mesaj -> 400", big.status_code == 400 and big.json()["detail"]["code"] == "too_long")
+    bad_img = client.post("/api/chat", json={"message": "", "image": "bu-base64-degil!!", "format_id": "phone"})
+    check("geçersiz base64 görsel -> 400 bad_image",
+          bad_img.status_code == 400 and bad_img.json()["detail"]["code"] == "bad_image")
+    weird_sid = client.post("/api/chat", json={"message": "orman", "format_id": "phone",
+                                               "session_id": "../" + "a" * 500})
+    check("geçersiz session_id -> yeni oturum açılıyor",
+          weird_sid.status_code == 200 and len(weird_sid.json()["session_id"]) == 32)
+
+    # Görsel başarısız olursa boş oturum oluşmamalı.
+    before = len(SESSIONS)
+    client.post("/api/chat", json={"message": "", "image": "iVBORw0KGgo=", "format_id": "phone",
+                                   "llm": {"vision_model": "olmayan-vl"}})
+    check("vision hatasında boş oturum oluşturulmuyor", len(SESSIONS) == before)
+
+    # Varsayılan format formats.json'dan geliyor.
+    cfg = client.get("/api/config").json()
+    check("varsayılan format formats.json 'default' alanından",
+          cfg["defaults"]["format_id"] == "desktop_fhd")
+
+    # Şablon: hedef == üretim ise 'upscale' yazmamalı (SD1.5 + avatar 512->512).
+    fmts, fams = load_presets()
+    pkg = prompting.build_package(fmts["avatar"], fams["sd15"], {"positive": "x"})
+    check("SD1.5 avatar: 512->512 'ölçekleme gerekmez' etiketi",
+          pkg["settings"]["final_label"] == "ölçekleme gerekmez")
+    check("sistem promptunda yinelenen madde numarası yok",
+          prompting.SYSTEM_PROMPT_BASE.count("\n8. ") == 1 and "\n11. " in prompting.SYSTEM_PROMPT_BASE)
+
+    # ComfyUI köprüsü: hatalar 500 değil anlaşılır 502 olmalı.
+    r = client.post("/api/comfyui/checkpoints", json={"url": MOCK_URL})  # 404 döner (ComfyUI değil)
+    check("ComfyUI HTTP hatası -> 502 + ipucu (500 değil)",
+          r.status_code == 502 and r.json()["detail"].get("hint"), r.text[:200])
+    r = client.post("/api/comfyui/checkpoints", json={"url": "http://127.0.0.1:9"})
+    check("ComfyUI kapalı -> 502", r.status_code == 502)
+
+    captured = {}
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"prompt_id": "abc"}
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json):
+            captured.update(json)
+            return _Resp()
+
+    orig = comfyui.httpx.AsyncClient
+    comfyui.httpx.AsyncClient = _Client
+    try:
+        out = asyncio.run(comfyui.send("127.0.0.1:8188", {
+            "checkpoint": "m.safetensors", "positive": "p", "negative": "", "width": 768,
+            "height": 1344, "steps": 24, "cfg": 1.0, "sampler": "euler", "scheduler": "simple",
+            "seed": 0}))
+    finally:
+        comfyui.httpx.AsyncClient = orig
+    check("ComfyUI: seed=0 korunuyor (rastgeleye dönmüyor)",
+          out["seed"] == 0 and captured["prompt"]["3"]["inputs"]["seed"] == 0)
 
 
 def load_presets():

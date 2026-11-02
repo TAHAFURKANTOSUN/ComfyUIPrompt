@@ -5,12 +5,15 @@
 veya:
     python -m uvicorn backend.main:app --host 127.0.0.1 --port 8765
 """
+import base64
+import binascii
+import re
 import time
 import uuid
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -18,9 +21,52 @@ from . import comfyui, llm_client, presets, prompting
 from .config import ROOT, load_config
 
 app = FastAPI(title="ComfyUI Prompt Asistanı")
-app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
-)
+
+# ---------------------------------------------------------------------------
+# Güvenlik: bu sunucu kullanıcının Ollama/ComfyUI'sine istek ileten bir yerel
+# proxy'dir. Eskiden CORS "*" açıktı — kullanıcının ziyaret ettiği HERHANGİ bir
+# web sitesi arka planda bu API'yi çağırıp ComfyUI kuyruğuna iş ekleyebilir,
+# yerel ağdaki adreslere istek attırabilir ve yanıtları okuyabilirdi. Arayüz
+# aynı kökenden sunulduğu için CORS'a ihtiyaç yoktur; gerekirse config.json ->
+# server.cors_origins ile açıkça izin verilir. Host başlığı kontrolü de DNS
+# rebinding saldırılarını engeller.
+# ---------------------------------------------------------------------------
+_SERVER_CFG = load_config()["server"]
+_LOOPBACK = {"127.0.0.1", "localhost", "::1"}
+
+if _SERVER_CFG.get("cors_origins"):
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(_SERVER_CFG["cors_origins"]),
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type"],
+    )
+
+
+def _hostname(host_header: str) -> str:
+    host = (host_header or "").strip().lower()
+    if host.startswith("["):  # [::1]:8765
+        return host[1:].split("]", 1)[0]
+    if host.count(":") == 1:
+        return host.split(":", 1)[0]
+    return host
+
+
+_ALLOWED_HOSTS = {h.lower() for h in _SERVER_CFG.get("allowed_hosts") or []}
+_ENFORCE_HOST = (
+    str(_SERVER_CFG.get("host", "127.0.0.1")).lower() in _LOOPBACK
+    or str(_SERVER_CFG.get("host", "")).startswith("127.")
+) and "*" not in _ALLOWED_HOSTS
+
+
+@app.middleware("http")
+async def _host_guard(request: Request, call_next):
+    if _ENFORCE_HOST and _hostname(request.headers.get("host", "")) not in _ALLOWED_HOSTS:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": {"code": "bad_host", "message": "Geçersiz Host başlığı."}},
+        )
+    return await call_next(request)
 
 # ---------------------------------------------------------------------------
 # Oturum durumu (in-memory — görev tanımına göre kalıcı saklama gerekmiyor)
@@ -28,6 +74,12 @@ app.add_middleware(
 SESSIONS: dict = {}
 MAX_SESSIONS = 200
 MAX_HISTORY = 24  # sisteme gönderilen geçmiş mesaj sınırı (küçük modellerde bağlamı korur)
+MAX_MESSAGE_CHARS = 8000
+# Tarayıcı görseli ~1024px JPEG'e küçültür (~200-500 KB); bu sınır yalnızca
+# kötüye kullanımı / yanlışlıkla dev dosya gönderimini engeller.
+MAX_IMAGE_B64_CHARS = 16 * 1024 * 1024
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_DATA_URL_RE = re.compile(r"^data:(image/[a-zA-Z0-9.+-]+);base64,", re.I)
 
 
 def _prune_sessions() -> None:
@@ -78,6 +130,44 @@ class ComfySendIn(BaseModel):
     seed: int | None = None
 
 
+def _bad_request(code: str, message: str, status: int = 400, hint: str | None = None):
+    detail = {"code": code, "message": message}
+    if hint:
+        detail["hint"] = hint
+    return HTTPException(status, detail=detail)
+
+
+def _decode_image(raw: str) -> tuple[str, str]:
+    """Düz base64 veya data URL alır -> (base64, mime). Geçersizse 400/413."""
+    if len(raw) > MAX_IMAGE_B64_CHARS:
+        raise _bad_request("image_too_large", "Görsel çok büyük.", 413,
+                           "Daha küçük bir görsel deneyin (arayüz görseli otomatik küçültür).")
+    mime = "image/jpeg"
+    m = _DATA_URL_RE.match(raw)
+    if m:
+        mime = m.group(1).lower()
+        b64 = raw[m.end():]
+    elif raw.startswith("data:"):
+        raise _bad_request("bad_image", "Desteklenmeyen görsel verisi (base64 data URL bekleniyor).")
+    else:
+        b64 = raw
+    b64 = "".join(b64.split())
+    try:
+        base64.b64decode(b64, validate=True)
+    except (binascii.Error, ValueError):
+        raise _bad_request("bad_image", "Görsel verisi çözülemedi (geçersiz base64).")
+    if not b64:
+        raise _bad_request("bad_image", "Görsel verisi boş.")
+    return b64, mime
+
+
+def _llm_http_error(exc: llm_client.LLMError) -> HTTPException:
+    return HTTPException(
+        status_code=502,
+        detail={"code": exc.code, "message": exc.message, "hint": exc.hint},
+    )
+
+
 # ---------------------------------------------------------------------------
 # API uçları
 # ---------------------------------------------------------------------------
@@ -86,6 +176,8 @@ async def get_config():
     cfg = load_config()
     formats = presets.load_formats()
     families, default_family = presets.load_families()
+    if default_family not in families:
+        default_family = next(iter(families), None)
     return {
         "formats": list(formats.values()),
         "families": [
@@ -93,7 +185,10 @@ async def get_config():
             for fam in families.values()
         ],
         "styles": presets.load_styles(),
-        "defaults": {"format_id": "desktop_fhd", "family_id": default_family},
+        "defaults": {
+            "format_id": presets.default_format_id(formats),
+            "family_id": default_family,
+        },
         "llm": {
             "mode": cfg["llm"]["mode"],
             "base_url": cfg["llm"]["base_url"],
@@ -106,7 +201,10 @@ async def get_config():
 async def chat(inp: ChatIn):
     message = (inp.message or "").strip()
     if not message and not inp.image:
-        raise HTTPException(400, detail={"code": "empty", "message": "Mesaj boş olamaz."})
+        raise _bad_request("empty", "Mesaj boş olamaz.")
+    if len(message) > MAX_MESSAGE_CHARS:
+        raise _bad_request("too_long", f"Mesaj çok uzun (en fazla {MAX_MESSAGE_CHARS} karakter).")
+    image = _decode_image(inp.image) if inp.image else None
 
     cfg = load_config()
     formats = presets.load_formats()
@@ -114,13 +212,29 @@ async def chat(inp: ChatIn):
 
     fmt = formats.get(inp.format_id)
     if fmt is None:
-        raise HTTPException(400, detail={"code": "bad_format", "message": "Bilinmeyen format preset'i."})
+        raise _bad_request("bad_format", "Bilinmeyen format preset'i.")
     family_selected = bool(inp.family_id)
     fam = families.get(inp.family_id or default_family)
     if fam is None:
-        raise HTTPException(400, detail={"code": "bad_family", "message": "Bilinmeyen model ailesi."})
+        raise _bad_request("bad_family", "Bilinmeyen model ailesi.")
 
-    sid = inp.session_id or uuid.uuid4().hex
+    overrides = inp.llm.model_dump(exclude_none=True) if inp.llm else None
+
+    # Görsel eklendiyse: önce vision modeliyle İngilizce tarife çevir (2 aşamalı akış),
+    # tarifi kullanıcı mesajına göm — sonrası normal metin boru hattıyla aynı.
+    if image:
+        b64, mime = image
+        try:
+            desc = await llm_client.describe_image(
+                cfg["llm"], b64, prompting.VISION_INSTRUCTION, overrides, mime=mime
+            )
+        except llm_client.LLMError as exc:
+            raise _llm_http_error(exc)
+        base_text = message or "Bu görseli yeniden oluşturacak bir prompt üret."
+        message = f"{base_text}\n\n[Eklenen görselin otomatik analizi]: {desc}"
+
+    # Geçersiz/aşırı uzun oturum kimliği gelirse yeni oturum aç.
+    sid = inp.session_id if inp.session_id and _SESSION_ID_RE.match(inp.session_id) else uuid.uuid4().hex
     sess = SESSIONS.setdefault(sid, {"messages": [], "t": time.time()})
     sess["t"] = time.time()
     _prune_sessions()
@@ -132,37 +246,15 @@ async def chat(inp: ChatIn):
         + [{"role": "user", "content": message}]
     )
 
-    overrides = inp.llm.model_dump(exclude_none=True) if inp.llm else None
-
-    # Görsel eklendiyse: önce vision modeliyle İngilizce tarife çevir (2 aşamalı akış),
-    # tarifi kullanıcı mesajına göm — sonrası normal metin boru hattıyla aynı.
-    if inp.image:
-        b64 = inp.image.split(",", 1)[1] if inp.image.startswith("data:") else inp.image
-        try:
-            desc = await llm_client.describe_image(
-                cfg["llm"], b64, prompting.VISION_INSTRUCTION, overrides
-            )
-        except llm_client.LLMError as exc:
-            raise HTTPException(
-                status_code=502,
-                detail={"code": exc.code, "message": exc.message, "hint": exc.hint},
-            )
-        base_text = message or "Bu görseli yeniden oluşturacak bir prompt üret."
-        message = f"{base_text}\n\n[Eklenen görselin otomatik analizi]: {desc}"
-        # mesajlar listesindeki son kullanıcı mesajını da güncelle
-        messages = messages[:-1] + [{"role": "user", "content": message}]
-
     try:
         raw = await llm_client.chat(cfg["llm"], messages, overrides)
     except llm_client.LLMError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail={"code": exc.code, "message": exc.message, "hint": exc.hint},
-        )
+        raise _llm_http_error(exc)
 
     parsed = prompting.parse_llm_output(raw)
     sess["messages"].append({"role": "user", "content": message})
-    sess["messages"].append({"role": "assistant", "content": raw.strip() or "{}"})
+    # <think> blokları geçmişe yazılmaz (bağlam penceresini boşuna doldurur).
+    sess["messages"].append({"role": "assistant", "content": prompting.strip_thinking(raw) or "{}"})
     sess["messages"] = sess["messages"][-MAX_HISTORY * 2 :]
 
     if parsed["action"] == "generate":
@@ -233,5 +325,6 @@ if __name__ == "__main__":
     import uvicorn
 
     server_cfg = load_config()["server"]
-    print(f"\n  ComfyUI Prompt Asistanı -> http://{server_cfg['host']}:{server_cfg['port']}\n")
+    shown = "127.0.0.1" if server_cfg["host"] in ("0.0.0.0", "::") else server_cfg["host"]
+    print(f"\n  ComfyUI Prompt Asistanı -> http://{shown}:{server_cfg['port']}\n")
     uvicorn.run(app, host=server_cfg["host"], port=int(server_cfg["port"]), log_level="info")

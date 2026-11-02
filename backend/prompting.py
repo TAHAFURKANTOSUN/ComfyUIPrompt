@@ -13,7 +13,8 @@ import json
 import re
 
 # ---------------------------------------------------------------------------
-# Sistem promptu (görev tanımındaki Bölüm 5 metni birebir gömülüdür)
+# Sistem promptu (görev tanımındaki Bölüm 5 metni gömülüdür; yalnızca orijinaldeki
+# yinelenen "8." madde numarası düzeltilmiştir)
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT_BASE = """Sen ComfyUI için görsel üretim prompt'ları hazırlayan bir uzmansın. Görevin, kullanıcının
@@ -44,12 +45,12 @@ Kurallar:
      stili) kendi bilgine dayanarak ayrıntılı şekilde tarif et.
    - Canlı çekim (gerçek oyunculu) karakterlerde, gerçek oyuncunun yüzünü birebir hedeflemek
      yerine kostüm/rol/sahne odaklı tarif kullan; bu durumu kullanıcıya kısaca belirt.
-8. Marka logoları veya gerçek ünlü kişilerin (oyuncu, şarkıcı vb.) kendi kimlikleriyle birebir
+9. Marka logoları veya gerçek ünlü kişilerin (oyuncu, şarkıcı vb.) kendi kimlikleriyle birebir
    portresini hedefleyen taleplerde dikkatli ol; rol/karakter odaklı tarif kullanmayı öner.
-9. Yerel/açık kaynak model olduğun için az bilinen veya yeni (2025 sonrası) karakterler hakkında
+10. Yerel/açık kaynak model olduğun için az bilinen veya yeni (2025 sonrası) karakterler hakkında
    bilgin sınırlı veya hatalı olabilir. Emin değilsen bunu kullanıcıya açıkça söyle ve karakterin
    görünümünü kısaca kendi cümleleriyle tarif etmesini iste; tahmin uydurup yanlış bilgi verme.
-10. Kısa ve öz ol; gereksiz açıklama yapma, doğrudan kullanılabilir prompt üret."""
+11. Kısa ve öz ol; gereksiz açıklama yapma, doğrudan kullanılabilir prompt üret."""
 
 OUTPUT_PROTOCOL = """
 ÇIKTI PROTOKOLÜ (ÇOK ÖNEMLİ):
@@ -175,7 +176,14 @@ def _extract_json(text: str):
 
 
 def _clean_text(text: str) -> str:
-    return _THINK_RE.sub("", text).strip()
+    return _THINK_RE.sub("", text or "").strip()
+
+
+def strip_thinking(text: str) -> str:
+    """<think>…</think> akıl yürütme bloklarını atar. Sohbet geçmişine yazılan
+    asistan yanıtlarında kullanılır: düşünce metni her turda modele geri
+    gönderilirse küçük modellerin bağlam penceresini hızla doldurur."""
+    return _clean_text(text)
 
 
 def _norm_lora(raw):
@@ -244,6 +252,12 @@ def _cfg_display(settings: dict) -> str:
     return f"{a}-{b}" if a != b else f"{float(a):g}"
 
 
+def _final_label(gw: int, gh: int, tw: int, th: int) -> str:
+    if (tw, th) == (gw, gh):
+        return "ölçekleme gerekmez"
+    return "downscale sonrası" if tw * th < gw * gh else "upscale sonrası"
+
+
 def build_package(fmt: dict, fam: dict, parsed: dict) -> dict:
     """LLM'in yaratıcı çıktısını preset'lerden gelen teknik değerlerle birleştirir.
     Tüm kabul-kriteri garantileri burada uygulanır."""
@@ -264,7 +278,7 @@ def build_package(fmt: dict, fam: dict, parsed: dict) -> dict:
     settings = {
         "gen": [gw, gh],
         "target": [tw, th],
-        "final_label": "downscale sonrası" if tw * th < gw * gh else "upscale sonrası",
+        "final_label": _final_label(gw, gh, tw, th),
         "sampler": s["sampler"],
         "scheduler": s["scheduler"],
         "steps": _range_display(s["steps"]),

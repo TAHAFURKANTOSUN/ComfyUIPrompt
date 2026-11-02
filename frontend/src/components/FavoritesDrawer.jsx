@@ -1,12 +1,18 @@
 import { MessageSquarePlus, Star, Trash2, X } from "lucide-react";
 import CopyButton from "./CopyButton.jsx";
+import useEscape from "../useEscape.js";
 
 export default function FavoritesDrawer({ open, onClose, favs, onUse, onDelete }) {
+  useEscape(open, onClose);
+
   if (!open) return null;
 
   return (
     <div className="fixed inset-0 z-40 flex justify-end bg-black/60 backdrop-blur-sm" onClick={onClose}>
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Favori prompt'lar"
         className="flex h-full w-full max-w-md flex-col border-l border-slate-800 bg-slate-900 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
@@ -15,7 +21,11 @@ export default function FavoritesDrawer({ open, onClose, favs, onUse, onDelete }
             <Star size={15} className="text-amber-400" />
             Favori prompt'lar
           </h2>
-          <button onClick={onClose} className="rounded-md p-1 text-slate-400 hover:bg-slate-800">
+          <button
+            onClick={onClose}
+            aria-label="Kapat"
+            className="rounded-md p-1 text-slate-400 hover:bg-slate-800"
+          >
             <X size={16} />
           </button>
         </div>
@@ -54,6 +64,8 @@ export default function FavoritesDrawer({ open, onClose, favs, onUse, onDelete }
                 </button>
                 <button
                   onClick={() => onDelete(f.id)}
+                  title="Favoriden sil"
+                  aria-label="Favoriden sil"
                   className="ml-auto rounded-md p-1 text-slate-500 hover:bg-slate-800 hover:text-rose-400"
                 >
                   <Trash2 size={13} />

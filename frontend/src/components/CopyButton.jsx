@@ -12,12 +12,14 @@ async function copyText(text) {
   ta.style.opacity = "0";
   document.body.appendChild(ta);
   ta.select();
-  document.execCommand("copy");
+  const ok = document.execCommand("copy");
   document.body.removeChild(ta);
+  if (!ok) throw new Error("copy failed");
 }
 
 export default function CopyButton({ text, label = "Kopyala", className = "" }) {
   const [copied, setCopied] = useState(false);
+  const [failed, setFailed] = useState(false);
 
   const onClick = async () => {
     try {
@@ -25,7 +27,9 @@ export default function CopyButton({ text, label = "Kopyala", className = "" }) 
       setCopied(true);
       setTimeout(() => setCopied(false), 1600);
     } catch {
-      /* sessizce geç */
+      // Kopyalama başarısızsa kullanıcı "Kopyalandı" sanmasın.
+      setFailed(true);
+      setTimeout(() => setFailed(false), 2000);
     }
   };
 
@@ -42,7 +46,7 @@ export default function CopyButton({ text, label = "Kopyala", className = "" }) 
       }
     >
       {copied ? <Check size={13} /> : <Copy size={13} />}
-      {copied ? "Kopyalandı" : label}
+      {copied ? "Kopyalandı" : failed ? "Kopyalanamadı — elle seçin" : label}
     </button>
   );
 }
