@@ -35,6 +35,13 @@ DEFAULTS = {
         # buraya makinenin adını/IP'sini ekleyin ya da ["*"] verin.
         "allowed_hosts": ["127.0.0.1", "localhost", "::1"],
     },
+    "sessions": {
+        # Sohbet geçmişi bu SQLite dosyasında kalıcı saklanır (proje köküne göre
+        # göreli). ":memory:" verilirse sunucu kapanınca geçmiş silinir.
+        "db_path": "data/sessions.db",
+        # Bu sayının üzerindeki en eski oturumlar otomatik silinir.
+        "max_sessions": 500,
+    },
 }
 
 
@@ -59,6 +66,7 @@ def load_config() -> dict:
         "LLM_VISION_MODEL": ("llm", "vision_model"),
         "LLM_MODE": ("llm", "mode"),
         "HOST": ("server", "host"),
+        "SESSIONS_DB": ("sessions", "db_path"),
         "PORT": ("server", "port"),
     }
     for env, (section, key) in env_map.items():

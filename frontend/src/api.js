@@ -2,7 +2,10 @@ async function req(path, options) {
   let resp;
   try {
     resp = await fetch(path, options);
-  } catch {
+  } catch (e) {
+    if (e?.name === "AbortError") {
+      throw Object.assign(new Error("İstek iptal edildi."), { code: "cancelled" });
+    }
     throw Object.assign(new Error("Sunucuya ulaşılamıyor. Backend çalışıyor mu?"), {
       code: "backend_down",
     });
@@ -18,12 +21,20 @@ async function req(path, options) {
   return data;
 }
 
-const post = (path, body) =>
+const post = (path, body, signal) =>
   req(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    signal,
   });
+
+// crypto.randomUUID yalnızca güvenli bağlamda (https/localhost) var; LAN'dan
+// http ile açılınca da çalışsın diye yedek üretici.
+export function newRequestId() {
+  if (window.crypto?.randomUUID) return window.crypto.randomUUID().replace(/-/g, "");
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 12);
+}
 
 // Görseli tarayıcıda küçültüp JPEG data-URL'e çevirir (yerel vision modeline
 // dev dosya göndermemek için; ~1024px analiz için fazlasıyla yeterli).
@@ -61,9 +72,13 @@ export const api = {
     ).toString();
     return req("/api/llm/status" + (q ? `?${q}` : ""));
   },
-  chat: (body) => post("/api/chat", body),
-  reset: (session_id) => post("/api/session/reset", { session_id }),
+  chat: (body, signal) => post("/api/chat", body, signal),
+  cancel: (request_id) => post("/api/chat/cancel", { request_id }),
+  sessions: () => req("/api/sessions"),
+  session: (id) => req(`/api/sessions/${encodeURIComponent(id)}`),
+  deleteSession: (id) => req(`/api/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }),
   unload: (body = {}) => post("/api/llm/unload", body),
   comfyCheckpoints: (url) => post("/api/comfyui/checkpoints", { url }),
+  comfyLoras: (url) => post("/api/comfyui/loras", { url }),
   comfySend: (body) => post("/api/comfyui/send", body),
 };

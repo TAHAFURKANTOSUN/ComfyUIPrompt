@@ -8,11 +8,12 @@ API katmanının tamamı gerçektir.
 
 Çalıştırma (proje kökünden):  python3 tests/test_acceptance.py
 """
-import asyncio
 import os
 import socket
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -28,14 +29,21 @@ def _free_port() -> int:
 
 MOCK_PORT = _free_port()
 MOCK_URL = f"http://127.0.0.1:{MOCK_PORT}"
+COMFY_PORT = _free_port()
+COMFY_URL = f"http://127.0.0.1:{COMFY_PORT}"
 # Backend config'i her istekte okur; ortam değişkeni config.json'u ezer.
 os.environ["OLLAMA_BASE_URL"] = MOCK_URL
+# Oturumlar geçici bir SQLite dosyasına yazılır (kullanıcının geçmişine dokunulmaz).
+TMP_DIR = tempfile.TemporaryDirectory(prefix="cpa-test-")
+DB_PATH = os.path.join(TMP_DIR.name, "sessions.db")
+os.environ["SESSIONS_DB"] = DB_PATH
 
 import httpx  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from backend import comfyui, llm_client, prompting  # noqa: E402
-from backend.main import SESSIONS, app  # noqa: E402
+from backend import llm_client, prompting  # noqa: E402
+from backend.main import app  # noqa: E402
+from backend.sessions import SessionStore, get_store  # noqa: E402
 
 PASS, FAIL = [], []
 
@@ -45,22 +53,23 @@ def check(name: str, cond: bool, detail: str = ""):
     print(f"  {'✓' if cond else '✗ HATA'}  {name}" + (f"  [{detail}]" if detail and not cond else ""))
 
 
-def start_mock():
+def start_mock(module="tests.mock_ollama:app", port=None, probe="/api/tags"):
+    port = port or MOCK_PORT
     proc = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "tests.mock_ollama:app",
-         "--host", "127.0.0.1", "--port", str(MOCK_PORT), "--log-level", "error"],
+        [sys.executable, "-m", "uvicorn", module,
+         "--host", "127.0.0.1", "--port", str(port), "--log-level", "error"],
         cwd=str(ROOT),
     )
     for _ in range(60):
         if proc.poll() is not None:
-            raise RuntimeError("Sahte Ollama süreci beklenmedik şekilde kapandı")
+            raise RuntimeError(f"Sahte sunucu ({module}) beklenmedik şekilde kapandı")
         try:
-            httpx.get(f"{MOCK_URL}/api/tags", timeout=1, trust_env=False)
+            httpx.get(f"http://127.0.0.1:{port}{probe}", timeout=1, trust_env=False)
             return proc
         except Exception:
             time.sleep(0.25)
     proc.terminate()
-    raise RuntimeError("Sahte Ollama başlatılamadı")
+    raise RuntimeError(f"Sahte sunucu ({module}) başlatılamadı")
 
 
 def chat(client, message, format_id, family_id, session_id=None):
@@ -74,15 +83,24 @@ def chat(client, message, format_id, family_id, session_id=None):
 
 def main():
     mock = start_mock()
+    comfy = start_mock("tests.mock_comfyui:app", COMFY_PORT, "/object_info/LoraLoader")
     # Host başlığı koruması loopback dışını reddeder; TestClient'ın varsayılan
     # "testserver" host'u yerine gerçek kullanımdaki adresi taklit et.
     client = TestClient(app, base_url="http://127.0.0.1:8765")
     try:
         run_all(client)
         run_review_checks(client)
+        run_feature_checks(client)
     finally:
-        mock.terminate()
-        mock.wait(timeout=10)
+        for proc in (mock, comfy):
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        get_store().close()
+        TMP_DIR.cleanup()
 
     print(f"\nSONUÇ: {len(PASS)} başarılı, {len(FAIL)} başarısız")
     if FAIL:
@@ -275,7 +293,7 @@ def run_review_checks(client):
 
     # Geçmişe <think> blokları yazılmamalı.
     r = chat(client, "sisli bir orman", "phone", "sdxl")
-    hist = SESSIONS[r["session_id"]]["messages"]
+    hist = get_store().history(r["session_id"], 100)
     check("sohbet geçmişinde <think> bloğu saklanmıyor",
           all("<think>" not in m["content"] for m in hist))
 
@@ -291,10 +309,10 @@ def run_review_checks(client):
           weird_sid.status_code == 200 and len(weird_sid.json()["session_id"]) == 32)
 
     # Görsel başarısız olursa boş oturum oluşmamalı.
-    before = len(SESSIONS)
+    before = get_store().count()
     client.post("/api/chat", json={"message": "", "image": "iVBORw0KGgo=", "format_id": "phone",
                                    "llm": {"vision_model": "olmayan-vl"}})
-    check("vision hatasında boş oturum oluşturulmuyor", len(SESSIONS) == before)
+    check("vision hatasında boş oturum oluşturulmuyor", get_store().count() == before)
 
     # Varsayılan format formats.json'dan geliyor.
     cfg = client.get("/api/config").json()
@@ -316,39 +334,145 @@ def run_review_checks(client):
     r = client.post("/api/comfyui/checkpoints", json={"url": "http://127.0.0.1:9"})
     check("ComfyUI kapalı -> 502", r.status_code == 502)
 
-    captured = {}
-
-    class _Resp:
-        status_code = 200
-
-        def json(self):
-            return {"prompt_id": "abc"}
-
-    class _Client:
-        def __init__(self, *a, **k):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return False
-
-        async def post(self, url, json):
-            captured.update(json)
-            return _Resp()
-
-    orig = comfyui.httpx.AsyncClient
-    comfyui.httpx.AsyncClient = _Client
-    try:
-        out = asyncio.run(comfyui.send("127.0.0.1:8188", {
-            "checkpoint": "m.safetensors", "positive": "p", "negative": "", "width": 768,
-            "height": 1344, "steps": 24, "cfg": 1.0, "sampler": "euler", "scheduler": "simple",
-            "seed": 0}))
-    finally:
-        comfyui.httpx.AsyncClient = orig
+    out = client.post("/api/comfyui/send", json={
+        "url": COMFY_URL, "checkpoint": "sdxl_base.safetensors", "positive": "p", "negative": "",
+        "width": 768, "height": 1344, "steps": 24, "cfg": 1.0, "sampler": "euler",
+        "scheduler": "simple", "seed": 0})
+    last = httpx.get(f"{COMFY_URL}/_last", trust_env=False).json()
     check("ComfyUI: seed=0 korunuyor (rastgeleye dönmüyor)",
-          out["seed"] == 0 and captured["prompt"]["3"]["inputs"]["seed"] == 0)
+          out.status_code == 200 and out.json()["seed"] == 0 and last["3"]["inputs"]["seed"] == 0,
+          out.text[:200])
+
+
+def run_feature_checks(client):
+    """Yeni özellikler: kalıcı oturumlar (SQLite), istek iptali, LoRA workflow'u."""
+    store = get_store()
+
+    # ---------------- Kalıcı oturumlar ----------------
+    print("\n[S] Oturumların kalıcı saklanması (SQLite)")
+    r1 = chat(client, "Miku duvar kağıdı", "phone", "sdxl")
+    sid = r1["session_id"]
+    r2 = chat(client, "var, trigger: mikuv2", "phone", "sdxl", session_id=sid)
+    check("ikinci tur geçmişi SQLite'tan okuyup devam etti", r2["type"] == "package"
+          and r2["package"]["lora"]["trigger"] == "mikuv2")
+    listed = client.get("/api/sessions").json()["sessions"]
+    mine = next((x for x in listed if x["id"] == sid), None)
+    check("oturum listesinde başlık + aile/format + mesaj sayısı",
+          mine is not None and mine["title"] == "Miku duvar kağıdı"
+          and mine["family_id"] == "sdxl" and mine["format_id"] == "phone"
+          and mine["message_count"] == 4, str(mine))
+    check("liste en son güncellenen önce", listed[0]["id"] == sid)
+    full = client.get(f"/api/sessions/{sid}").json()
+    kinds = [(m["role"], m["kind"]) for m in full["messages"]]
+    check("arayüz mesajları geri yüklenebiliyor (soru + paket)",
+          kinds == [("user", "chat"), ("assistant", "chat"), ("user", "chat"), ("assistant", "package")],
+          str(kinds))
+    check("paket birebir saklandı",
+          full["messages"][-1]["pkg"]["template_text"] == r2["package"]["template_text"])
+
+    # Sunucu yeniden başlatılmış gibi: aynı dosyayı yeni bir bağlantıyla aç.
+    reopened = SessionStore(DB_PATH)
+    hist = reopened.history(sid, 100)
+    check("yeniden açılan veritabanında geçmiş duruyor (restart sonrası)",
+          len(hist) == 4 and hist[0]["content"] == "Miku duvar kağıdı")
+    reopened.close()
+
+    img_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    ri = client.post("/api/chat", json={"message": "", "image": "data:image/png;base64," + img_b64,
+                                        "format_id": "phone", "family_id": "flux"}).json()
+    gi = client.get(f"/api/sessions/{ri['session_id']}").json()
+    check("görselli tur: görsel + başlık saklandı",
+          gi["messages"][0].get("image", "").startswith("data:image/png;base64,")
+          and gi["title"] == "Görselden prompt")
+    check("LLM geçmişinde görsel analizi tarifi var (takip mesajları için)",
+          "[Eklenen görselin otomatik analizi]" in store.history(ri["session_id"], 10)[0]["content"])
+
+    d = client.delete(f"/api/sessions/{sid}").json()
+    check("oturum silinebiliyor", d["deleted"] and client.get(f"/api/sessions/{sid}").status_code == 404)
+    check("bilinmeyen/geçersiz oturum -> 404", client.get("/api/sessions/..%2Fetc").status_code == 404)
+
+    small = SessionStore(":memory:", max_sessions=3)
+    for i in range(5):
+        small.append_turn(f"s{i}", "u", "a", {"kind": "chat"}, {"kind": "chat"}, "t", "phone", "sdxl")
+    check("en eski oturumlar max_sessions sınırında budanıyor",
+          small.count() == 3 and small.get("s0") is None and small.get("s4") is not None)
+    small.close()
+
+    # ---------------- İptal ----------------
+    print("\n[C] Uzun süren isteği iptal etme")
+    before = store.count()
+    box = {}
+
+    def slow():
+        t0 = time.time()
+        box["resp"] = client.post("/api/chat", json={
+            "message": "yavaş bir orman", "format_id": "phone", "family_id": "sdxl",
+            "request_id": "iptal-testi-1"})
+        box["elapsed"] = time.time() - t0
+
+    th = threading.Thread(target=slow)
+    th.start()
+    cancelled = False
+    for _ in range(40):  # istek sunucuya ulaşıp kaydolana kadar dene
+        time.sleep(0.1)
+        cancelled = client.post("/api/chat/cancel", json={"request_id": "iptal-testi-1"}).json()["cancelled"]
+        if cancelled:
+            break
+    th.join(timeout=15)
+    resp = box.get("resp")
+    check("iptal ucu sürmekte olan isteği buldu", cancelled)
+    check("iptal edilen istek hızla 499 'cancelled' döndü (30 sn beklemedi)",
+          resp is not None and resp.status_code == 499
+          and resp.json()["detail"]["code"] == "cancelled" and box["elapsed"] < 10,
+          f"{getattr(resp, 'status_code', None)} {box.get('elapsed')}")
+    check("iptal edilen istek oturum/geçmiş bırakmadı", store.count() == before)
+    nope = client.post("/api/chat/cancel", json={"request_id": "olmayan-istek"}).json()
+    check("bilinmeyen request_id -> cancelled=false", nope == {"ok": True, "cancelled": False})
+    ok = chat(client, "orman", "phone", "sdxl")
+    check("iptalden sonra normal istekler çalışıyor", ok["type"] == "package")
+
+    # ---------------- LoRA workflow ----------------
+    print("\n[L] LoRA düğümlü ComfyUI workflow'u")
+    lr = client.post("/api/comfyui/loras", json={"url": COMFY_URL})
+    check("LoRA listesi ComfyUI'den çekiliyor",
+          lr.status_code == 200 and "characters/miku_v2.safetensors" in lr.json()["loras"], lr.text[:200])
+    base = {"url": COMFY_URL, "checkpoint": "sdxl_base.safetensors", "positive": "mikuv2, girl",
+            "negative": "blurry", "width": 768, "height": 1344, "steps": 28, "cfg": 6.0,
+            "sampler": "dpmpp_2m", "scheduler": "karras"}
+    sr = client.post("/api/comfyui/send", json={
+        **base, "lora": {"name": "characters/miku_v2.safetensors", "strength_model": 0.7}})
+    wf = httpx.get(f"{COMFY_URL}/_last", trust_env=False).json()
+    ln = wf.get("10", {})
+    check("LoRA'lı gönderim kabul edildi", sr.status_code == 200 and sr.json()["lora"] == "characters/miku_v2.safetensors",
+          sr.text[:200])
+    check("workflow'da LoraLoader düğümü + dosya + ağırlıklar",
+          ln.get("class_type") == "LoraLoader"
+          and ln["inputs"]["lora_name"] == "characters/miku_v2.safetensors"
+          and ln["inputs"]["strength_model"] == 0.7 and ln["inputs"]["strength_clip"] == 0.7)
+    check("KSampler modeli ve iki CLIPTextEncode LoRA'dan besleniyor",
+          wf["3"]["inputs"]["model"] == ["10", 0]
+          and wf["6"]["inputs"]["clip"] == ["10", 1] and wf["7"]["inputs"]["clip"] == ["10", 1]
+          and ln["inputs"]["model"] == ["4", 0] and ln["inputs"]["clip"] == ["4", 1])
+    plain = client.post("/api/comfyui/send", json=base)
+    wf2 = httpx.get(f"{COMFY_URL}/_last", trust_env=False).json()
+    check("LoRA'sız gönderimde LoraLoader yok", plain.status_code == 200 and "10" not in wf2
+          and wf2["3"]["inputs"]["model"] == ["4", 0])
+    bad = client.post("/api/comfyui/send", json={**base, "lora": {"name": "yok.safetensors"}})
+    check("sunucuda olmayan LoRA -> 502 + LoRA ipucu",
+          bad.status_code == 502 and "LoRA" in (bad.json()["detail"].get("hint") or ""), bad.text[:200])
+    inv = client.post("/api/comfyui/send", json={**base, "lora": {"name": "x", "strength_model": 99}})
+    check("geçersiz LoRA ağırlığı -> 422", inv.status_code == 422)
+
+    fmts, fams = load_presets()
+    pkg = prompting.build_package(fmts["phone"], fams["sdxl"], {
+        "positive": "girl singing on stage",
+        "lora": {"name": "miku_v2.safetensors", "trigger": "mikuv2", "weight": 0.8}})
+    check("guard: LLM unuttuysa LoRA tetikleyicisi başa ekleniyor",
+          pkg["positive"].startswith("mikuv2, girl singing"))
+    pkg = prompting.build_package(fmts["phone"], fams["sdxl"], {
+        "positive": "a girl, MikuV2 style",
+        "lora": {"name": "m", "trigger": "mikuv2", "weight": 0.8}})
+    check("guard: tetikleyici zaten varsa tekrar eklenmiyor", pkg["positive"] == "a girl, MikuV2 style")
 
 
 def load_presets():

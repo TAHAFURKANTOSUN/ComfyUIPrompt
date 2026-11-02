@@ -24,7 +24,9 @@ Doğal dilde anlattığınız fikri ("sisli bir orman, gizemli atmosfer"), seçt
 - 🧬 **Model ailesine özel stil** — SD 1.5 / SDXL / Pony-Illustrious / Flux için tamamen farklı prompt yazım kuralları (etiket listesi ↔ doğal dil).
 - 🖼️ **Görselden prompt çıkarma** — bir görsel yükleyin, benzerini üretecek prompt otomatik çıksın.
 - 🎭 **Karakter + LoRA farkındalığı** — LoRA'nız varsa tetikleyici kelimeyi ve önerilen ağırlığı otomatik yerleştirir.
-- 🔌 **ComfyUI'ye tek tık gönderim** — prompt'u kopyalamadan doğrudan üretim kuyruğuna ekler (opsiyonel).
+- 🔌 **ComfyUI'ye tek tık gönderim** — prompt'u kopyalamadan doğrudan üretim kuyruğuna ekler; LoRA seçerseniz workflow'a LoraLoader düğümü eklenir (opsiyonel).
+- 🕘 **Kalıcı sohbet geçmişi** — sohbetler yerel bir SQLite dosyasında saklanır; sayfa yenilense ya da sunucu yeniden başlasa da kaldığınız yerden devam edersiniz.
+- ⏹️ **İptal** — uzun süren bir isteği tek tıkla (ya da Esc ile) durdurun; yerel modeldeki üretim de hemen kesilir.
 - 🔒 **%100 yerel** — LLM olarak Ollama kullanır; API anahtarı gerekmez, hiçbir veri dışarı çıkmaz.
 
 ## 📋 İçindekiler
@@ -34,6 +36,7 @@ Doğal dilde anlattığınız fikri ("sisli bir orman, gizemli atmosfer"), seçt
 - [🎨 Kullanım](#-kullanım)
   - [🖼️ Görselden prompt tahmini](#-görselden-prompt-tahmini)
   - [🎭 Karakter istekleri](#-karakter-istekleri)
+  - [🕘 Geçmiş sohbetler ve iptal](#-geçmiş-sohbetler-ve-iptal)
 - [💾 VRAM paylaşımı](#-vram-paylaşımı-comfyui--llm-aynı-gpuda)
 - [🔌 ComfyUI'ye doğrudan gönderme](#-comfyuiye-doğrudan-gönderme-opsiyonel)
 - [⚙️ Yapılandırma](#-yapılandırma)
@@ -83,6 +86,13 @@ Yazma alanındaki resim simgesine tıklayarak (ya da panodan yapıştırarak / s
 
 "Hatsune Miku duvar kağıdı" gibi isteklerde asistan önce o karakter için LoRA'nız olup olmadığını sorar. LoRA varsa tetikleyici kelimesini prompt'a yerleştirir ve önerilen ağırlığı belirtir; yoksa Pony/Illustrious'ta karakter+seri etiketini doğrudan kullanır, SDXL/Flux'ta ise ismi değil karakterin görsel tarifini yazar (bu modeller isimleri güvenilir tanımaz). Palet simgesinden hazır **stil çipleri**, yıldız simgesinden **favoriler** kullanılabilir.
 
+### 🕘 Geçmiş sohbetler ve iptal
+
+- Her sohbet otomatik olarak `data/sessions.db` (SQLite) dosyasına kaydedilir. Üst bardaki **saat** simgesi geçmiş sohbetleri listeler; birine tıklayınca mesajlar, prompt kartları ve o sohbetin format/model ailesi seçimi geri gelir ve sohbete kaldığınız yerden devam edebilirsiniz. Çöp kutusu simgesi sohbeti kalıcı olarak siler.
+- Sayfayı yenilediğinizde son açık sohbet otomatik geri yüklenir. **Yeni sohbet** düğmesi eski sohbeti silmez, yalnızca yenisini başlatır.
+- Eklediğiniz görseller de (küçültülmüş hâliyle) sohbetle birlikte saklanır. Veriler yalnızca bu bilgisayarda durur; tamamen silmek için `data/` klasörünü silebilirsiniz.
+- Bir istek uzun sürüyorsa "Prompt hazırlanıyor…" balonundaki **İptal** düğmesine, kırmızı durdur düğmesine ya da **Esc**'ye basın. Backend LLM isteğini keser (Ollama'daki üretim de durur, GPU boşa çalışmaz); yazdığınız mesaj ve görsel düzenlemeniz için yazma alanına geri konur. İptal edilen istekler geçmişte iz bırakmaz.
+
 ## 💾 VRAM paylaşımı (ComfyUI + LLM aynı GPU'da)
 
 - LLM sohbeti bittikten 5 dakika sonra bellekten düşer (`config.json` → `llm.keep_alive`).
@@ -91,16 +101,18 @@ Yazma alanındaki resim simgesine tıklayarak (ya da panodan yapıştırarak / s
 
 ## 🔌 ComfyUI'ye doğrudan gönderme (opsiyonel)
 
-**Ayarlar → ComfyUI** bölümüne sunucu adresinizi yazın (ör. `http://127.0.0.1:8188`), **Bağlan** ile checkpoint listesini çekip birini seçin. Artık her prompt kartındaki **ComfyUI'ye Gönder** butonu, üretimi basit bir text2img workflow'uyla (checkpoint → prompt → KSampler → kaydet) doğrudan kuyruğa ekler. İstekler backend üzerinden iletildiği için ComfyUI'de CORS ayarı gerekmez. LoRA'lı üretimlerde LoRA node'unu kendi workflow'unuza ekleyip prompt'u kopyalamanız önerilir. (Flux'un tek dosyalık fp8 checkpoint'leri de bu workflow'la çalışır; CFG otomatik 1.0 gönderilir.)
+**Ayarlar → ComfyUI** bölümüne sunucu adresinizi yazın (ör. `http://127.0.0.1:8188`), **Bağlan** ile checkpoint listesini çekip birini seçin. Artık her prompt kartındaki **ComfyUI'ye Gönder** butonu, üretimi basit bir text2img workflow'uyla (checkpoint → prompt → KSampler → kaydet) doğrudan kuyruğa ekler. İstekler backend üzerinden iletildiği için ComfyUI'de CORS ayarı gerekmez. (Flux'un tek dosyalık fp8 checkpoint'leri de bu workflow'la çalışır; CFG otomatik 1.0 gönderilir.)
+
+**LoRA'lı gönderim:** **Bağlan** checkpoint'lerle birlikte sunucudaki LoRA dosyalarını da çeker. Her prompt kartında bir **ComfyUI LoRA** seçimi belirir. Asistan bir LoRA önerdiyse (ör. `miku_v2.safetensors` / tetikleyici `mikuv2`), sunucudaki en yakın dosya (ör. `characters/miku_v2.safetensors`) otomatik seçilir ve önerilen ağırlık doldurulur. İsterseniz başka bir dosya ya da "LoRA'sız gönder" seçebilirsiniz. LoRA seçiliyse `backend/workflows/text2img_lora.json` kullanılır: checkpoint → **LoraLoader** (model + CLIP) → prompt → KSampler → kaydet. LoRA'nın tetikleyici kelimesi positive prompt'ta yoksa asistan onu otomatik olarak başa ekler.
 
 ## ⚙️ Yapılandırma
 
-- **`config.json`** — LLM adresi/modeli, görsel analizi için `vision_model`, `keep_alive`, zaman aşımı, sunucu portu. `llm.mode` alanını `"openai"` yaparak LM Studio / llama.cpp server gibi OpenAI-uyumlu yerel sunuculara da bağlanabilirsiniz (vision dahil).
+- **`config.json`** — LLM adresi/modeli, görsel analizi için `vision_model`, `keep_alive`, zaman aşımı, sunucu portu, sohbet veritabanı (`sessions.db_path`, varsayılan `data/sessions.db`; `":memory:"` kalıcı olmayan mod) ve saklanacak en fazla sohbet sayısı (`sessions.max_sessions`, varsayılan 500 — en eskiler otomatik silinir). `llm.mode` alanını `"openai"` yaparak LM Studio / llama.cpp server gibi OpenAI-uyumlu yerel sunuculara da bağlanabilirsiniz (vision dahil).
 - **`presets/formats.json`** — format preset'leri. Yeni bir satır ekleyerek (id, ad, oran, `target`, `gen`, `gen_sd15`, ikon) kod değişikliği olmadan yeni preset tanımlayabilirsiniz; sunucuyu yeniden başlatmak bile gerekmez. Arayüzde ilk seçili gelen preset `default` alanıyla belirlenir.
 - **`presets/model_families.json`** — model aileleri, sampler/steps/cfg varsayılanları ve her ailenin prompt stili rehberi (`llm_guidance`).
 - **`presets/styles.json`** — stil kütüphanesi çipleri.
 
-**Ortam değişkenleri** (`config.json`'u ezer): `OLLAMA_BASE_URL` / `LLM_BASE_URL`, `LLM_MODEL`, `LLM_VISION_MODEL`, `LLM_MODE`, `HOST`, `PORT`.
+**Ortam değişkenleri** (`config.json`'u ezer): `OLLAMA_BASE_URL` / `LLM_BASE_URL`, `LLM_MODEL`, `LLM_VISION_MODEL`, `LLM_MODE`, `HOST`, `PORT`, `SESSIONS_DB`.
 
 ### 🔐 Güvenlik ve ağdan erişim
 
@@ -115,7 +127,7 @@ SD 1.5 için tabloya ek olarak ayrı bir taban çözünürlük (`gen_sd15`) tutu
 
 ## ✅ Testler
 
-- `python tests/test_acceptance.py` — sahte bir Ollama sunucusuyla tüm kabul kriterlerini uçtan uca doğrular (görselden-prompt akışı ve güvenlik/sağlamlık regresyonları dahil 69 kontrol; gerçek model gerektirmez). Sahte sunucu boş bir portta açılır, makinenizde gerçek Ollama çalışıyor olsa da çakışmaz.
+- `python tests/test_acceptance.py` — sahte bir Ollama sunucusuyla tüm kabul kriterlerini uçtan uca doğrular (görselden-prompt akışı, güvenlik/sağlamlık regresyonları, kalıcı oturumlar, istek iptali ve LoRA workflow'u dahil 94 kontrol; gerçek model gerektirmez). Sahte Ollama ve sahte ComfyUI (`tests/mock_comfyui.py`) boş portlarda açılır, oturumlar geçici bir veritabanına yazılır — makinenizdeki gerçek Ollama'yla ya da sohbet geçmişinizle çakışmaz.
 - Her push/PR'da GitHub Actions bu testleri (Python 3.10 ve 3.13) ve frontend build'ini otomatik çalıştırır (`.github/workflows/tests.yml`).
 - `python tests/live_smoke.py` — gerçek Ollama'yla 5 canlı senaryo koşturur (önce `python -m backend.main` ile sunucuyu açın). `--image bir_resim.jpg` ile görselden-prompt senaryosu da eklenir.
 
@@ -135,10 +147,11 @@ SD 1.5 için tabloya ek olarak ayrı bir taban çözünürlük (`gen_sd15`) tutu
 ├─ start.bat / start.sh      → tek tıkla başlat
 ├─ config.json               → LLM ve sunucu ayarları
 ├─ presets/                  → format / model ailesi / stil config'leri (düzenlenebilir)
-├─ backend/                  → FastAPI: LLM proxy'si, guard'lar, şablon, ComfyUI köprüsü
-│  └─ workflows/             → ComfyUI text2img workflow şablonu
+├─ backend/                  → FastAPI: LLM proxy'si, guard'lar, şablon, ComfyUI köprüsü, oturum deposu
+│  └─ workflows/             → ComfyUI text2img workflow şablonları (düz + LoRA'lı)
+├─ data/                     → sohbet geçmişi (sessions.db, otomatik oluşur, git'e girmez)
 ├─ frontend/                 → React + Tailwind kaynak kodu ve hazır build (dist/)
-└─ tests/                    → kabul testleri (mock Ollama) + canlı duman testi
+└─ tests/                    → kabul testleri (mock Ollama + mock ComfyUI) + canlı duman testi
 ```
 
 ---
@@ -149,7 +162,7 @@ Hata bildirimi ve öneriler için Issues bölümü kullanılabilir. Pull request
 
 - Mimari kararların gerekçesi için önce `NOTES.md`'ye bakın — özellikle "deterministik çekirdek + LLM protokolü" ayrımı (bkz. madde 2) LLM'in şablon/çözünürlük/sampler değerlerini asla doğrudan üretmediğini, bunların `presets/*.json`'dan geldiğini garanti eder; bu ayrımı bozmayan değişiklikler tercih edilir.
 - Frontend değişiklikleri `frontend/src` içinde yapılıp `npm run build` ile `frontend/dist` güncellenmelidir (derlenmiş çıktı repoya dahildir). Bağımlılık sürümleri `frontend/package-lock.json` ile sabitlenmiştir; `npm install` yerine `npm ci` kullanın.
-- Göndermeden önce `python tests/test_acceptance.py`'nin 69 kontrolü de geçtiğinden emin olun; davranışı değiştiren PR'larda ilgili teste de bir kontrol eklenmesi beklenir.
+- Göndermeden önce `python tests/test_acceptance.py`'nin 94 kontrolü de geçtiğinden emin olun; davranışı değiştiren PR'larda ilgili teste de bir kontrol eklenmesi beklenir.
 
 ## 📄 Lisans
 

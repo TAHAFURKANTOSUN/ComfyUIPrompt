@@ -5,19 +5,20 @@
 veya:
     python -m uvicorn backend.main:app --host 127.0.0.1 --port 8765
 """
+import asyncio
 import base64
 import binascii
 import re
-import time
 import uuid
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import comfyui, llm_client, presets, prompting
+from .sessions import get_store
 from .config import ROOT, load_config
 
 app = FastAPI(title="ComfyUI Prompt Asistanı")
@@ -59,20 +60,32 @@ _ENFORCE_HOST = (
 ) and "*" not in _ALLOWED_HOSTS
 
 
-@app.middleware("http")
-async def _host_guard(request: Request, call_next):
-    if _ENFORCE_HOST and _hostname(request.headers.get("host", "")) not in _ALLOWED_HOSTS:
-        return JSONResponse(
-            status_code=400,
-            content={"detail": {"code": "bad_host", "message": "Geçersiz Host başlığı."}},
-        )
-    return await call_next(request)
+class _HostGuard:
+    """Saf ASGI ara katmanı (BaseHTTPMiddleware yerine): istemci bağlantı
+    kopmasının uç noktaya iletilmesini — dolayısıyla iptali — bozmaz."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and _ENFORCE_HOST:
+            host = dict(scope.get("headers") or []).get(b"host", b"").decode("latin-1")
+            if _hostname(host) not in _ALLOWED_HOSTS:
+                resp = JSONResponse(
+                    status_code=400,
+                    content={"detail": {"code": "bad_host", "message": "Geçersiz Host başlığı."}},
+                )
+                await resp(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(_HostGuard)
 
 # ---------------------------------------------------------------------------
-# Oturum durumu (in-memory — görev tanımına göre kalıcı saklama gerekmiyor)
+# Oturumlar SQLite'ta kalıcı saklanır (backend/sessions.py). Burada yalnızca
+# LLM'e gönderilen geçmiş uzunluğu ve girdi sınırları tanımlıdır.
 # ---------------------------------------------------------------------------
-SESSIONS: dict = {}
-MAX_SESSIONS = 200
 MAX_HISTORY = 24  # sisteme gönderilen geçmiş mesaj sınırı (küçük modellerde bağlamı korur)
 MAX_MESSAGE_CHARS = 8000
 # Tarayıcı görseli ~1024px JPEG'e küçültür (~200-500 KB); bu sınır yalnızca
@@ -80,13 +93,11 @@ MAX_MESSAGE_CHARS = 8000
 MAX_IMAGE_B64_CHARS = 16 * 1024 * 1024
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _DATA_URL_RE = re.compile(r"^data:(image/[a-zA-Z0-9.+-]+);base64,", re.I)
+# Arayüzde yeniden göstermek için oturumla birlikte saklanacak en büyük görsel.
+MAX_STORED_IMAGE_CHARS = 3 * 1024 * 1024
 
-
-def _prune_sessions() -> None:
-    if len(SESSIONS) <= MAX_SESSIONS:
-        return
-    for sid in sorted(SESSIONS, key=lambda s: SESSIONS[s]["t"])[: len(SESSIONS) - MAX_SESSIONS]:
-        SESSIONS.pop(sid, None)
+# İptal edilebilir, sürmekte olan LLM istekleri: request_id -> asyncio.Task
+_INFLIGHT: dict = {}
 
 
 # ---------------------------------------------------------------------------
@@ -106,14 +117,26 @@ class ChatIn(BaseModel):
     family_id: str | None = None
     image: str | None = None  # base64 (düz ya da data URL) — görselden prompt tahmini
     llm: LLMOverride | None = None
+    # İstemcinin ürettiği kimlik; /api/chat/cancel ile bu isteği iptal etmeye yarar.
+    request_id: str | None = None
 
 
 class SessionIn(BaseModel):
     session_id: str
 
 
+class CancelIn(BaseModel):
+    request_id: str
+
+
 class ComfyListIn(BaseModel):
     url: str
+
+
+class ComfyLoraIn(BaseModel):
+    name: str = Field(min_length=1, max_length=512)
+    strength_model: float = Field(0.8, ge=-10, le=10)
+    strength_clip: float | None = Field(None, ge=-10, le=10)
 
 
 class ComfySendIn(BaseModel):
@@ -128,6 +151,7 @@ class ComfySendIn(BaseModel):
     sampler: str
     scheduler: str
     seed: int | None = None
+    lora: ComfyLoraIn | None = None
 
 
 def _bad_request(code: str, message: str, status: int = 400, hint: str | None = None):
@@ -159,6 +183,38 @@ def _decode_image(raw: str) -> tuple[str, str]:
     if not b64:
         raise _bad_request("bad_image", "Görsel verisi boş.")
     return b64, mime
+
+
+async def _watch_disconnect(request: Request, task: asyncio.Task) -> None:
+    """İstemci bağlantıyı kapatırsa (tarayıcıda iptal, sekme kapandı) LLM
+    görevini iptal eder. httpx bağlantısı kapanınca Ollama da üretimi durdurur —
+    GPU boşuna dakikalarca çalışmaz."""
+    try:
+        while not task.done():
+            if await request.is_disconnected():
+                task.cancel()
+                return
+            await asyncio.sleep(0.5)
+    except Exception:  # izleyici hiçbir koşulda isteği bozmamalı
+        pass
+
+
+async def _run_cancellable(request: Request, request_id: str | None, coro):
+    task = asyncio.ensure_future(coro)
+    if request_id:
+        _INFLIGHT[request_id] = task
+    watcher = asyncio.create_task(_watch_disconnect(request, task))
+    try:
+        await asyncio.wait({task})
+    finally:
+        watcher.cancel()
+        if request_id and _INFLIGHT.get(request_id) is task:
+            _INFLIGHT.pop(request_id, None)
+        if not task.done():  # sunucu kapanıyor / dış görev iptal edildi
+            task.cancel()
+    if task.cancelled():
+        raise HTTPException(499, detail={"code": "cancelled", "message": "İstek iptal edildi."})
+    return task.result()
 
 
 def _llm_http_error(exc: llm_client.LLMError) -> HTTPException:
@@ -198,13 +254,14 @@ async def get_config():
 
 
 @app.post("/api/chat")
-async def chat(inp: ChatIn):
+async def chat(inp: ChatIn, request: Request):
     message = (inp.message or "").strip()
     if not message and not inp.image:
         raise _bad_request("empty", "Mesaj boş olamaz.")
     if len(message) > MAX_MESSAGE_CHARS:
         raise _bad_request("too_long", f"Mesaj çok uzun (en fazla {MAX_MESSAGE_CHARS} karakter).")
     image = _decode_image(inp.image) if inp.image else None
+    request_id = inp.request_id if inp.request_id and _SESSION_ID_RE.match(inp.request_id) else None
 
     cfg = load_config()
     formats = presets.load_formats()
@@ -219,53 +276,97 @@ async def chat(inp: ChatIn):
         raise _bad_request("bad_family", "Bilinmeyen model ailesi.")
 
     overrides = inp.llm.model_dump(exclude_none=True) if inp.llm else None
+    store = get_store()
+    # Geçersiz/aşırı uzun oturum kimliği gelirse yeni oturum aç.
+    sid = inp.session_id if inp.session_id and _SESSION_ID_RE.match(inp.session_id) else uuid.uuid4().hex
+    system_prompt = prompting.build_system_prompt(fmt, fam, family_selected)
 
-    # Görsel eklendiyse: önce vision modeliyle İngilizce tarife çevir (2 aşamalı akış),
-    # tarifi kullanıcı mesajına göm — sonrası normal metin boru hattıyla aynı.
-    if image:
-        b64, mime = image
-        try:
+    async def pipeline():
+        llm_message = message
+        # Görsel eklendiyse: önce vision modeliyle İngilizce tarife çevir (2 aşamalı
+        # akış), tarifi kullanıcı mesajına göm — sonrası normal metin boru hattı.
+        if image:
+            b64, mime = image
             desc = await llm_client.describe_image(
                 cfg["llm"], b64, prompting.VISION_INSTRUCTION, overrides, mime=mime
             )
-        except llm_client.LLMError as exc:
-            raise _llm_http_error(exc)
-        base_text = message or "Bu görseli yeniden oluşturacak bir prompt üret."
-        message = f"{base_text}\n\n[Eklenen görselin otomatik analizi]: {desc}"
-
-    # Geçersiz/aşırı uzun oturum kimliği gelirse yeni oturum aç.
-    sid = inp.session_id if inp.session_id and _SESSION_ID_RE.match(inp.session_id) else uuid.uuid4().hex
-    sess = SESSIONS.setdefault(sid, {"messages": [], "t": time.time()})
-    sess["t"] = time.time()
-    _prune_sessions()
-
-    system_prompt = prompting.build_system_prompt(fmt, fam, family_selected)
-    messages = (
-        [{"role": "system", "content": system_prompt}]
-        + sess["messages"][-MAX_HISTORY:]
-        + [{"role": "user", "content": message}]
-    )
+            base_text = message or "Bu görseli yeniden oluşturacak bir prompt üret."
+            llm_message = f"{base_text}\n\n[Eklenen görselin otomatik analizi]: {desc}"
+        messages = (
+            [{"role": "system", "content": system_prompt}]
+            + store.history(sid, MAX_HISTORY)
+            + [{"role": "user", "content": llm_message}]
+        )
+        raw = await llm_client.chat(cfg["llm"], messages, overrides)
+        return llm_message, raw
 
     try:
-        raw = await llm_client.chat(cfg["llm"], messages, overrides)
+        llm_message, raw = await _run_cancellable(request, request_id, pipeline())
     except llm_client.LLMError as exc:
         raise _llm_http_error(exc)
 
     parsed = prompting.parse_llm_output(raw)
-    sess["messages"].append({"role": "user", "content": message})
-    # <think> blokları geçmişe yazılmaz (bağlam penceresini boşuna doldurur).
-    sess["messages"].append({"role": "assistant", "content": prompting.strip_thinking(raw) or "{}"})
-    sess["messages"] = sess["messages"][-MAX_HISTORY * 2 :]
-
     if parsed["action"] == "generate":
         package = prompting.build_package(fmt, fam, parsed)
-        return {"session_id": sid, "type": "package", "package": package}
-    return {"session_id": sid, "type": "chat", "message": parsed["message"]}
+        result = {"session_id": sid, "type": "package", "package": package}
+        ui_assistant = {"role": "assistant", "kind": "package", "pkg": package}
+    else:
+        result = {"session_id": sid, "type": "chat", "message": parsed["message"]}
+        ui_assistant = {"role": "assistant", "kind": "chat", "text": parsed["message"]}
+
+    # Oturum yalnızca başarılı bir turdan sonra (atomik olarak) yazılır: iptal
+    # edilen / hata alan istekler geçmişte iz bırakmaz.
+    ui_user = {"role": "user", "kind": "chat", "text": message}
+    if image and len(inp.image) <= MAX_STORED_IMAGE_CHARS:
+        b64, mime = image
+        ui_user["image"] = f"data:{mime};base64,{b64}"
+    store.append_turn(
+        sid,
+        llm_message,
+        # <think> blokları geçmişe yazılmaz (bağlam penceresini boşuna doldurur).
+        prompting.strip_thinking(raw) or "{}",
+        ui_user,
+        ui_assistant,
+        title=message or "Görselden prompt",
+        format_id=fmt["id"],
+        family_id=fam["id"],
+    )
+    return result
+
+
+@app.post("/api/chat/cancel")
+async def chat_cancel(inp: CancelIn):
+    task = _INFLIGHT.get(inp.request_id)
+    if task is None or task.done():
+        return {"ok": True, "cancelled": False}
+    # TestClient gibi ortamlarda istek başka bir olay döngüsünde çalışabilir.
+    task.get_loop().call_soon_threadsafe(task.cancel)
+    return {"ok": True, "cancelled": True}
+
+
+@app.get("/api/sessions")
+async def list_sessions(limit: int = 100):
+    return {"sessions": get_store().list_sessions(max(1, min(limit, 500)))}
+
+
+@app.get("/api/sessions/{sid}")
+async def get_session(sid: str):
+    sess = get_store().get(sid) if _SESSION_ID_RE.match(sid) else None
+    if sess is None:
+        raise _bad_request("no_session", "Oturum bulunamadı.", 404)
+    return sess
+
+
+@app.delete("/api/sessions/{sid}")
+async def delete_session(sid: str):
+    deleted = get_store().delete(sid) if _SESSION_ID_RE.match(sid) else False
+    return {"ok": True, "deleted": deleted}
 
 
 @app.post("/api/session/reset")
 async def reset_session(inp: SessionIn):
-    SESSIONS.pop(inp.session_id, None)
+    """Geriye dönük uyumluluk: oturumu siler (DELETE /api/sessions/{id} ile aynı)."""
+    get_store().delete(inp.session_id)
     return {"ok": True}
 
 
@@ -291,6 +392,14 @@ async def llm_unload(inp: LLMOverride | None = None):
 async def comfy_checkpoints(inp: ComfyListIn):
     try:
         return {"checkpoints": await comfyui.list_checkpoints(inp.url)}
+    except comfyui.ComfyError as exc:
+        raise HTTPException(502, detail={"code": "comfy", "message": exc.message, "hint": exc.hint})
+
+
+@app.post("/api/comfyui/loras")
+async def comfy_loras(inp: ComfyListIn):
+    try:
+        return {"loras": await comfyui.list_loras(inp.url)}
     except comfyui.ComfyError as exc:
         raise HTTPException(502, detail={"code": "comfy", "message": exc.message, "hint": exc.hint})
 

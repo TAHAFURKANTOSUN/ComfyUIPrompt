@@ -270,6 +270,13 @@ def build_package(fmt: dict, fam: dict, parsed: dict) -> dict:
     if negative is not None:
         negative = negative.strip() or None
 
+    # GUARD: LoRA tetikleyici kelimesi positive prompt'ta yoksa başa eklenir —
+    # LoRA trigger olmadan çoğu zaman hiç etki etmez, küçük modeller bunu unutabilir.
+    lora = parsed.get("lora")
+    trigger = (lora or {}).get("trigger", "").strip()
+    if trigger and trigger.lower() not in positive.lower():
+        positive = f"{trigger}, {positive}" if positive else trigger
+
     # GUARD: çözünürlük her zaman preset'ten (LLM'den asla alınmaz).
     gw, gh = _res(fmt, fam)
     tw, th = fmt["target"]
@@ -299,7 +306,7 @@ def build_package(fmt: dict, fam: dict, parsed: dict) -> dict:
     pkg = {
         "positive": positive,
         "negative": negative,
-        "lora": parsed.get("lora"),
+        "lora": lora,
         "note": parsed.get("note"),
         "settings": settings,
     }

@@ -12,7 +12,9 @@ Kasıtlı davranışlar:
   - SDXL orman yanıtı <think> bloğu + ```json çiti içine sarılır -> ayrıştırıcı
     dayanıklılığı test edilir.
   - Karakter isteklerinde önce LoRA sorusu sorulur (kabul kriteri 5).
+  - "yavaş" içeren istekler 30 sn bekletilir -> iptal mekanizması test edilir.
 """
+import asyncio
 import json  # v1.1 — vision (görsel analizi) davranışı dahil
 
 from fastapi import FastAPI, Request
@@ -158,6 +160,16 @@ async def chat(request: Request):
             "message": {"role": "assistant", "content": VISION_DESCRIPTION},
             "done": True,
         }
+
+    # İptal testi: "yavaş" içeren istek çok uzun sürer (büyük model taklidi).
+    users = [m.get("content", "") for m in messages if m.get("role") == "user"]
+    if users and "yavaş" in users[-1].lower():
+        # Gerçek Ollama gibi: istemci bağlantıyı kapatırsa üretimi bırak.
+        for _ in range(150):
+            if await request.is_disconnected():
+                print("[mock-ollama] istemci bağlantıyı kesti, üretim durduruldu", flush=True)
+                return JSONResponse(status_code=499, content={"error": "client disconnected"})
+            await asyncio.sleep(0.2)
 
     content = decide(messages)
     return {

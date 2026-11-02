@@ -15,10 +15,12 @@ export default function SettingsModal({
   status,
   refreshStatus,
   defaults,
+  setComfyLoras,
 }) {
   const [ckpts, setCkpts] = useState([]);
   const [ckptBusy, setCkptBusy] = useState(false);
   const [ckptErr, setCkptErr] = useState(null);
+  const [loraCount, setLoraCount] = useState(null);
   const [unloadMsg, setUnloadMsg] = useState(null);
   const [statusBusy, setStatusBusy] = useState(false);
 
@@ -37,8 +39,10 @@ export default function SettingsModal({
   const fetchCkpts = async () => {
     setCkptBusy(true);
     setCkptErr(null);
+    const url = settings.comfyUrl || "http://127.0.0.1:8188";
+    if (!settings.comfyUrl) setSettings((s) => ({ ...s, comfyUrl: url }));
     try {
-      const r = await api.comfyCheckpoints(settings.comfyUrl || "http://127.0.0.1:8188");
+      const r = await api.comfyCheckpoints(url);
       const list = r.checkpoints || [];
       setCkpts(list);
       if (!list.length) setCkptErr("Sunucuda hiç checkpoint bulunamadı.");
@@ -46,6 +50,15 @@ export default function SettingsModal({
       // aksi halde açılır liste bir şey gösterip başka bir değer gönderirdi.
       else if (!list.includes(settings.checkpoint))
         setSettings((s) => ({ ...s, checkpoint: list[0] }));
+      // LoRA listesi opsiyonel: alınamazsa LoRA'sız gönderim yine çalışır.
+      try {
+        const lr = await api.comfyLoras(url);
+        setComfyLoras(lr.loras || []);
+        setLoraCount((lr.loras || []).length);
+      } catch {
+        setComfyLoras([]);
+        setLoraCount(0);
+      }
     } catch (e) {
       setCkptErr(e.message + (e.hint ? ` — ${e.hint}` : ""));
     }
@@ -261,9 +274,17 @@ export default function SettingsModal({
             </label>
           )}
           {ckptErr && <p className="text-[11px] text-rose-400">{ckptErr}</p>}
+          {loraCount !== null && !ckptErr && (
+            <p className="text-[11px] text-emerald-400">
+              {loraCount > 0
+                ? `${loraCount} LoRA bulundu — prompt kartlarından seçilebilir.`
+                : "Sunucuda LoRA bulunamadı (LoRA'sız gönderim çalışır)."}
+            </p>
+          )}
           <p className="text-[11px] leading-snug text-slate-500">
-            Basit text2img workflow'u kullanılır (checkpoint → prompt → KSampler → kaydet).
-            LoRA'lı üretim için LoRA'yı kendi ComfyUI workflow'unuza ekleyip prompt'u kopyalayın.
+            Basit text2img workflow'u kullanılır (checkpoint → [LoRA] → prompt → KSampler →
+            kaydet). Kartta bir LoRA seçerseniz araya LoraLoader düğümü eklenir; asistanın
+            önerdiği LoRA'ya en yakın dosya otomatik seçilir.
           </p>
         </section>
 

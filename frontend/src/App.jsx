@@ -1,7 +1,8 @@
-// v1.1 — görselden prompt tahmini (vision) destekli
+// v1.2 — kalıcı oturumlar, istek iptali, LoRA'lı ComfyUI gönderimi
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
+  History,
   ImagePlus,
   Loader2,
   Palette,
@@ -9,17 +10,21 @@ import {
   Send,
   Settings,
   Sparkles,
+  Square,
   Star,
   X,
 } from "lucide-react";
-import { api, fileToResizedDataURL } from "./api.js";
+import { api, fileToResizedDataURL, newRequestId } from "./api.js";
 import { iconFor } from "./icons.jsx";
 import PackageCard from "./components/PackageCard.jsx";
 import SettingsModal from "./components/SettingsModal.jsx";
 import FavoritesDrawer from "./components/FavoritesDrawer.jsx";
+import HistoryDrawer from "./components/HistoryDrawer.jsx";
+import useEscape from "./useEscape.js";
 
 const LS_SETTINGS = "cpa_settings_v1";
 const LS_FAVS = "cpa_favs_v1";
+const LS_SESSION = "cpa_session_v1"; // son açık sohbet — sayfa yenilenince geri yüklenir
 
 const EXAMPLES = [
   "Sisli bir orman, gizemli atmosfer",
@@ -61,6 +66,7 @@ export default function App() {
   const [status, setStatus] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showFavs, setShowFavs] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
   const [showStyles, setShowStyles] = useState(false);
   const [settings, setSettings] = useState(() => ({
     baseUrl: "",
@@ -72,21 +78,59 @@ export default function App() {
   }));
   const [favs, setFavs] = useState(() => loadLS(LS_FAVS, []));
   const [image, setImage] = useState(null); // data URL — görselden prompt tahmini
+  const [comfyLoras, setComfyLoras] = useState([]); // ComfyUI sunucusundaki LoRA dosyaları
 
   const chatRef = useRef(null);
+  const inflight = useRef(null); // { controller, requestId, text, image } — iptal için
+  // Son açık sohbetin kimliği İLK render'da okunur: aşağıdaki kaydetme efekti
+  // ilk çalışmasında null yazacağından, sonradan okumak onu kaybederdi.
+  const lastSession = useRef(loadLS(LS_SESSION, null));
   const inputRef = useRef(null);
   const fileRef = useRef(null);
 
   // --- yükleme ---
+  // Sunucudaki (SQLite) oturumu arayüze yükler; seçimleri de o sohbetinkine çeker.
+  const restoreSession = useCallback(async (id, c) => {
+    const sess = await api.session(id);
+    setSessionId(sess.id);
+    setMsgs((sess.messages || []).map((m) => ({ id: nextId(), ...m })));
+    if (sess.format_id && c.formats.some((f) => f.id === sess.format_id)) setFormatId(sess.format_id);
+    if (sess.family_id && c.families.some((f) => f.id === sess.family_id)) setFamilyId(sess.family_id);
+  }, []);
+
   useEffect(() => {
     api
       .config()
-      .then((c) => {
-        setCfg(c);
+      .then(async (c) => {
         setFormatId(c.defaults.format_id);
         setFamilyId(c.defaults.family_id);
+        // Sayfa yenilendiyse son sohbete kaldığı yerden devam et.
+        const last = lastSession.current;
+        if (last) {
+          try {
+            await restoreSession(last, c);
+          } catch {
+            saveLS(LS_SESSION, null); // silinmiş/budanmış oturum
+          }
+        }
+        setCfg(c);
       })
       .catch((e) => setCfgErr(e.message));
+  }, [restoreSession]);
+
+  useEffect(() => {
+    saveLS(LS_SESSION, sessionId);
+  }, [sessionId]);
+
+  // ComfyUI ayarlıysa LoRA listesini sessizce çek (kartlardaki LoRA seçimi için).
+  useEffect(() => {
+    if (!settings.comfyUrl) return;
+    api
+      .comfyLoras(settings.comfyUrl)
+      .then((r) => setComfyLoras(r.loras || []))
+      .catch(() => setComfyLoras([]));
+    // yalnızca açılışta; adres değişince Ayarlar'daki "Bağlan" yeniden çeker
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const refreshStatus = useCallback(async () => {
@@ -156,17 +200,31 @@ export default function App() {
       setInput("");
       setImage(null);
     }
-    push({ role: "user", kind: "chat", text, image: img });
+    const userMsgId = nextId();
+    setMsgs((m) => [...m, { id: userMsgId, role: "user", kind: "chat", text, image: img }]);
     setBusy(true);
+    const job = {
+      controller: new AbortController(),
+      requestId: newRequestId(),
+      text: fromExample ? "" : text,
+      image: img,
+      userMsgId,
+    };
+    inflight.current = job;
     try {
-      const r = await api.chat({
-        session_id: sessionId,
-        message: text,
-        format_id: formatId,
-        family_id: familyId,
-        image: img || undefined,
-        llm: llmOverrides(),
-      });
+      const r = await api.chat(
+        {
+          session_id: sessionId,
+          message: text,
+          format_id: formatId,
+          family_id: familyId,
+          image: img || undefined,
+          llm: llmOverrides(),
+          request_id: job.requestId,
+        },
+        job.controller.signal
+      );
+      if (inflight.current !== job) return; // bu sırada sohbet değişti
       setSessionId(r.session_id);
       if (r.type === "package") {
         push({ role: "assistant", kind: "package", pkg: r.package });
@@ -174,19 +232,64 @@ export default function App() {
         push({ role: "assistant", kind: "chat", text: r.message });
       }
     } catch (e) {
-      push({ role: "assistant", kind: "error", text: e.message, hint: e.hint });
+      if (e.code === "cancelled") return; // cancelRequest arayüzü zaten güncelledi
+      if (inflight.current === job) {
+        push({ role: "assistant", kind: "error", text: e.message, hint: e.hint });
+      }
     } finally {
-      setBusy(false);
+      if (inflight.current === job) {
+        inflight.current = null;
+        setBusy(false);
+        inputRef.current?.focus();
+      }
+    }
+  };
+
+  // Sürmekte olan isteği iptal eder: tarayıcı isteği keser, backend de LLM
+  // görevini durdurur (Ollama'daki üretim de biter, GPU boşa çalışmaz).
+  // restore=true ise gönderilen metin/görsel yazma alanına geri konur.
+  const cancelRequest = (restore = true) => {
+    const job = inflight.current;
+    if (!job) return;
+    inflight.current = null;
+    api.cancel(job.requestId).catch(() => {});
+    job.controller.abort();
+    setBusy(false);
+    if (restore) {
+      setMsgs((m) => [
+        ...m.filter((x) => x.id !== job.userMsgId),
+        { id: nextId(), kind: "info", text: "İstek iptal edildi — mesajın düzenlemen için geri yüklendi" },
+      ]);
+      if (job.text) setInput(job.text);
+      if (job.image) setImage(job.image);
       inputRef.current?.focus();
     }
   };
 
-  const newChat = async () => {
-    if (sessionId) api.reset(sessionId).catch(() => {});
+  const newChat = () => {
+    cancelRequest(false);
     setSessionId(null);
     setMsgs([]);
     setImage(null);
   };
+
+  const openSession = async (id) => {
+    setShowHistory(false);
+    if (id === sessionId && !busy) return;
+    cancelRequest(false);
+    try {
+      await restoreSession(id, cfg);
+    } catch (e) {
+      push({ role: "assistant", kind: "error", text: e.message, hint: e.hint });
+    }
+  };
+
+  const onSessionDeleted = (id) => {
+    if (id === sessionId) newChat();
+  };
+
+  // Esc: açık bir pencere yoksa sürmekte olan isteği iptal eder.
+  useEscape(busy && !showSettings && !showFavs && !showHistory, cancelRequest);
 
   const changeFormat = (id) => {
     setFormatId(id);
@@ -272,6 +375,14 @@ export default function App() {
           <span className="hidden max-w-[140px] truncate sm:inline">
             {statusOk ? modelShown : "Ollama yok"}
           </span>
+        </button>
+        <button
+          onClick={() => setShowHistory(true)}
+          title="Geçmiş sohbetler"
+          aria-label="Geçmiş sohbetler"
+          className="rounded-lg border border-slate-800 bg-slate-900 p-1.5 text-slate-300 hover:border-slate-700"
+        >
+          <History size={15} />
         </button>
         <button
           onClick={() => setShowFavs(true)}
@@ -396,7 +507,12 @@ export default function App() {
                   pkg={m.pkg}
                   onFav={toggleFav}
                   isFav={isFav(m.pkg)}
-                  comfy={{ enabled: comfyReady, url: settings.comfyUrl, checkpoint: settings.checkpoint }}
+                  comfy={{
+                    enabled: comfyReady,
+                    url: settings.comfyUrl,
+                    checkpoint: settings.checkpoint,
+                    loras: comfyLoras,
+                  }}
                   onOpenSettings={() => setShowSettings(true)}
                 />
               </div>
@@ -442,6 +558,14 @@ export default function App() {
             <div className="flex items-center gap-2 rounded-xl rounded-tl-sm border border-slate-800 bg-slate-900 px-3 py-2 text-[13px] text-slate-400">
               <Loader2 size={14} className="animate-spin text-indigo-400" />
               Prompt hazırlanıyor…
+              <button
+                onClick={() => cancelRequest()}
+                title="İsteği iptal et (Esc)"
+                className="ml-1 inline-flex items-center gap-1 rounded-md border border-slate-700 px-2 py-0.5 text-[11px] text-slate-300 transition hover:border-rose-500/60 hover:bg-rose-500/10 hover:text-rose-300"
+              >
+                <Square size={10} fill="currentColor" />
+                İptal
+              </button>
             </div>
           </div>
         )}
@@ -560,18 +684,29 @@ export default function App() {
             }
             className="max-h-32 flex-1 resize-none rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 outline-none transition focus:border-indigo-500"
           />
-          <button
-            onClick={() => send()}
-            disabled={busy || (!input.trim() && !image)}
-            className="shrink-0 rounded-xl bg-indigo-600 p-2.5 text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
-            title="Gönder (Enter)"
-            aria-label="Gönder"
-          >
-            <Send size={16} />
-          </button>
+          {busy ? (
+            <button
+              onClick={() => cancelRequest()}
+              className="shrink-0 rounded-xl bg-rose-600 p-2.5 text-white transition hover:bg-rose-500"
+              title="İsteği iptal et (Esc)"
+              aria-label="İptal et"
+            >
+              <Square size={16} fill="currentColor" />
+            </button>
+          ) : (
+            <button
+              onClick={() => send()}
+              disabled={!input.trim() && !image}
+              className="shrink-0 rounded-xl bg-indigo-600 p-2.5 text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
+              title="Gönder (Enter)"
+              aria-label="Gönder"
+            >
+              <Send size={16} />
+            </button>
+          )}
         </div>
         <p className="mt-1.5 hidden text-center text-[10px] text-slate-600 sm:block">
-          Enter gönderir · Shift+Enter yeni satır · Görsel yapıştırılabilir/sürüklenebilir ·
+          Enter gönderir · Shift+Enter yeni satır · Esc iptal eder · Görsel yapıştırılabilir/sürüklenebilir ·
           Prompt çıktıları İngilizce üretilir
         </p>
       </footer>
@@ -584,6 +719,15 @@ export default function App() {
         status={status}
         refreshStatus={refreshStatus}
         defaults={cfg.llm}
+        setComfyLoras={setComfyLoras}
+      />
+      <HistoryDrawer
+        open={showHistory}
+        onClose={() => setShowHistory(false)}
+        onOpen={openSession}
+        onDeleted={onSessionDeleted}
+        currentId={sessionId}
+        cfg={cfg}
       />
       <FavoritesDrawer
         open={showFavs}

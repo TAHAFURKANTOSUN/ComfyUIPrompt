@@ -1,7 +1,8 @@
-import { useState } from "react";
-import { Info, Loader2, Send, Star } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Info, Layers, Loader2, Send, Star } from "lucide-react";
 import CopyButton from "./CopyButton.jsx";
 import { api } from "../api.js";
+import { matchLora } from "../lora.js";
 
 function Block({ title, text, mono = true }) {
   return (
@@ -36,6 +37,17 @@ function SettingRow({ label, value }) {
 export default function PackageCard({ pkg, onFav, isFav, comfy, onOpenSettings }) {
   const s = pkg.settings;
   const [sendState, setSendState] = useState({ busy: false, msg: null, err: false });
+  const loras = comfy.loras || [];
+  // ComfyUI'ye gönderimde kullanılacak LoRA dosyası ("" = LoRA'sız) ve ağırlığı.
+  const [loraFile, setLoraFile] = useState(() => matchLora(loras, pkg.lora));
+  const [loraTouched, setLoraTouched] = useState(false);
+  const [strength, setStrength] = useState(pkg.lora?.weight ?? 0.8);
+
+  // LoRA listesi kart çizildikten sonra gelirse (ör. Ayarlar'da Bağlan) öneriyi uygula.
+  useEffect(() => {
+    if (!loraTouched) setLoraFile(matchLora(loras, pkg.lora));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loras]);
 
   const settingsText = "ÖNERİLEN AYARLAR:" + pkg.template_text.split("ÖNERİLEN AYARLAR:")[1];
 
@@ -53,10 +65,13 @@ export default function PackageCard({ pkg, onFav, isFav, comfy, onOpenSettings }
         cfg: s.cfg_value,
         sampler: s.sampler,
         scheduler: s.scheduler,
+        lora: loraFile ? { name: loraFile, strength_model: Number(strength) } : undefined,
       });
       setSendState({
         busy: false,
-        msg: `ComfyUI kuyruğuna alındı (id: ${String(r.prompt_id).slice(0, 8)}…, seed: ${r.seed})`,
+        msg:
+          `ComfyUI kuyruğuna alındı (id: ${String(r.prompt_id).slice(0, 8)}…, seed: ${r.seed})` +
+          (r.lora ? ` · LoRA: ${r.lora} @ ${Number(strength)}` : ""),
         err: false,
       });
     } catch (e) {
@@ -144,6 +159,56 @@ export default function PackageCard({ pkg, onFav, isFav, comfy, onOpenSettings }
         <p className="flex items-start gap-1.5 px-1 text-xs italic leading-snug text-slate-400">
           <Info size={13} className="mt-0.5 shrink-0" />
           {pkg.note}
+        </p>
+      )}
+
+      {/* ComfyUI'ye gönderimde kullanılacak LoRA (LoraLoader düğümü) */}
+      {comfy.enabled && loras.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2">
+          <Layers size={13} className="text-slate-400" />
+          <label htmlFor={`lora-${pkg.template_text.length}`} className="text-[11px] text-slate-400">
+            ComfyUI LoRA:
+          </label>
+          <select
+            id={`lora-${pkg.template_text.length}`}
+            value={loraFile}
+            onChange={(e) => {
+              setLoraFile(e.target.value);
+              setLoraTouched(true);
+            }}
+            className="min-w-0 max-w-full flex-1 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-100 outline-none focus:border-indigo-500"
+          >
+            <option value="">LoRA'sız gönder</option>
+            {loras.map((f) => (
+              <option key={f} value={f}>
+                {f}
+              </option>
+            ))}
+          </select>
+          {loraFile && (
+            <label className="flex items-center gap-1 text-[11px] text-slate-400">
+              ağırlık
+              <input
+                type="number"
+                min={-2}
+                max={2}
+                step={0.05}
+                value={strength}
+                onChange={(e) => setStrength(e.target.value)}
+                className="w-16 rounded-md border border-slate-700 bg-slate-950 px-1.5 py-1 text-xs text-slate-100 outline-none focus:border-indigo-500"
+              />
+            </label>
+          )}
+          {pkg.lora && !loraFile && !loraTouched && (
+            <p className="w-full text-[11px] text-amber-400/90">
+              Önerilen LoRA ({pkg.lora.name}) sunucuda bulunamadı — listeden seçin.
+            </p>
+          )}
+        </div>
+      )}
+      {comfy.enabled && loras.length === 0 && pkg.lora && (
+        <p className="px-1 text-[11px] text-slate-500">
+          LoRA'lı göndermek için Ayarlar → ComfyUI → Bağlan ile LoRA listesini çekin.
         </p>
       )}
 
